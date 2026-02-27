@@ -22,7 +22,6 @@ venv.bak/
 # Project specific
 dist/
 build/
-*.spec
 
 # Database & logs
 *.db
