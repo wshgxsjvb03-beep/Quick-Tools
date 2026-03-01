@@ -1,7 +1,59 @@
 import asyncio
 import os
+import sys
+import subprocess
 import time
 from datetime import datetime
+
+# Set local browsers path before importing playwright
+def get_browser_path():
+    base_dir = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+    return os.path.join(base_dir, "QuickToolsPlaywrightBrowsers")
+
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = get_browser_path()
+
+def _install_playwright_browsers(log_callback=None):
+    browser_path = get_browser_path()
+    if os.path.exists(browser_path) and any("chromium" in x for x in os.listdir(browser_path) if os.path.isdir(os.path.join(browser_path, x))):
+        return True
+
+    if log_callback:
+        log_callback("📦 初次运行：正在下载 Playwright 浏览器组件 (~150MB)，请稍候...")
+    
+    try:
+        from playwright._impl._driver import compute_driver_executable, get_driver_env
+        driver_executable, driver_cli = compute_driver_executable()
+        env = get_driver_env()
+        env["PLAYWRIGHT_BROWSERS_PATH"] = browser_path
+        
+        proc = subprocess.Popen(
+            [driver_executable, driver_cli, "install", "chromium"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        for line in proc.stdout:
+            if line and log_callback:
+                # We log selectively to avoid spamming the UI too much
+                if "Downloading" in line or "Playwright build" in line or "100%" in line:
+                    log_callback(f"下载进度: {line.strip()}")
+                
+        proc.wait()
+        if proc.returncode == 0:
+            if log_callback:
+                log_callback("✅ 浏览器组件下载完成！")
+            return True
+        else:
+            if log_callback:
+                log_callback(f"❌ 浏览器安装失败，退出码: {proc.returncode}")
+            return False
+    except Exception as e:
+        if log_callback:
+            log_callback(f"❌ 浏览器组件安装异常: {e}")
+        return False
+
+# Now safe to import async_playwright
 from playwright.async_api import async_playwright
 
 class HeyGenAutomation:
@@ -35,6 +87,9 @@ class HeyGenAutomation:
     async def start_browser(self, headless=False, storage_state_path=None):
         self.log(f"🚀 正在启动 Playwright 浏览器...")
         try:
+            # 确保浏览器组件已安装（阻塞等待以保证线程安全）
+            _install_playwright_browsers(self.log)
+
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
                 headless=headless,

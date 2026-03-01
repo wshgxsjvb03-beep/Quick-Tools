@@ -122,25 +122,53 @@ class ElevenLabsWorker(QThread):
                 
                 # Handle Voice Limit Reached specifically
                 if "voice_limit_reached" in err_str:
-                     # No point retrying immediately if we are full
                      raise Exception("声线槽位已满 (3/3)，且无法自动释放。请手动登录官网清理声线或升级套餐。")
 
-                # Check for specific network/server errors
+                # Enhanced API Error Handling
+                is_api_error = False
+                status_code = None
+                try:
+                    from elevenlabs.core.api_error import ApiError
+                    if isinstance(e, ApiError):
+                        is_api_error = True
+                        status_code = getattr(e, "status_code", None)
+                        # Attempt to extract detailed message if available
+                        if hasattr(e, "body") and isinstance(e.body, dict):
+                            detail = e.body.get("detail", {})
+                            if isinstance(detail, dict):
+                                detail_msg = detail.get("message", err_str)
+                                err_str = f"API Error {status_code}: {detail_msg}"
+                            else:
+                                err_str = f"API Error {status_code}: {detail}"
+                except ImportError:
+                    pass
+
+                # Expanded Network/Server Error Detection
                 is_network_error = (
                     "Server disconnected" in err_str or 
                     "RemoteProtocolError" in err_str or 
                     "connection" in err_str.lower() or
                     "SSL" in err_str or
-                    "EOF" in err_str
+                    "EOF" in err_str or
+                    "timeout" in err_str.lower() or
+                    status_code in [500, 502, 503, 504]
                 )
                 
                 if self.isInterruptionRequested():
                     raise InterruptedError("User requested stop")
 
-                # If loop finishes without returning (should be caught by last_exception check but just in case)
-                if attempt < max_retries - 1:
+                # If it's a known non-retryable API error, fail fast
+                if is_api_error and status_code in [400, 401, 402, 403, 422]:
+                    # 400: Bad Request, 401: Unauthorized, 402: Payment Required, 403: Forbidden, 422: Unprocessable Entity
+                    self.progress_log.emit(f"   ❌ 致命错误 ({status_code}): {err_str}")
+                    raise Exception(err_str)
+
+                # Retry logic
+                if attempt < max_retries - 1 and is_network_error:
                     wait_time = 5 + attempt * 2 # Progressive wait: 5, 7, 9...
-                    self.progress_log.emit(f"   ⚠️ 网络连接不稳定 ({err_str[:20]}...)，正在重试 ({attempt+1}/{max_retries})，等待 {wait_time}秒...")
+                    # Log more context about the error
+                    display_err = err_str if len(err_str) < 100 else err_str[:97] + "..."
+                    self.progress_log.emit(f"   ⚠️ 网络连接不稳定 ({display_err})，正在重试 ({attempt+1}/{max_retries})，等待 {wait_time}秒...")
                     
                     # Sleep in small increments to respond to interruption faster
                     for _ in range(wait_time * 2):
@@ -151,16 +179,14 @@ class ElevenLabsWorker(QThread):
                         raise InterruptedError("User requested stop")
                     continue
                 
-                # If we get here, cleanup temp file if exists
+                # If not a network error or out of retries, cleanup and raise
                 if 'temp_path' in locals() and os.path.exists(temp_path):
                     try: os.remove(temp_path)
                     except: pass
                 
-                # If not retryable or out of retries, re-raise
-                if not is_network_error:
-                    raise e
+                raise Exception(err_str)
         
-        # If loop finishes without returning (should be caught by last_exception check but just in case)
+        # If loop finishes without returning
         if last_exception:
             raise last_exception
 

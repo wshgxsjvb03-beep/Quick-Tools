@@ -1,46 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Environments
-.env
-.env.*
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# IDEs
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Project specific
-dist/
+token_file.txt
+fetch_logs.py
+fetch_logs_content.py
+fetch_logs_content2.py
+logs.zip
+logs_extracted/
 build/
-
-# Database & logs
-*.db
-history.db
-logs/
-
-# Config with secrets
-config.json
-
-# Debug / test scripts
-check_*.py
-debug_*.py
-diagnose_*.py
-test_*.py
-package.py
-create_repo.py
-
-# Temp and data files
-modules/heygen_manager/profiles/
-
-# macOS
-.DS_Store
+dist/
+check_ci.py

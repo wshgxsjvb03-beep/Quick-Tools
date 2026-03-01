@@ -185,7 +185,7 @@ class HeyGenManagerUI(QWidget):
         launch_layout = QHBoxLayout()
         launch_layout.addWidget(QLabel("并发浏览器数量:"))
         self.spin_count = QSpinBox()
-        self.spin_count.setRange(1, 10)
+        self.spin_count.setRange(1, 1000)
         self.spin_count.setValue(1)
         launch_layout.addWidget(self.spin_count)
         

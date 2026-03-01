@@ -13,10 +13,12 @@ if current_dir not in sys.path:
 
 from modules.config_manager import ConfigManager
 
+VERSION = "1.0.1"
+
 class DesktopApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Quick Tools - 自媒体工具箱")
+        self.setWindowTitle(f"Quick Tools v{VERSION} - 自媒体工具箱")
         self.resize(900, 700) # Ensure window is resizable and defaults to a reasonable size
         # self.setGeometry(100, 100, 1000, 750) # Removed fixed geometry to avoid high-DPI scaling issues
         self.config = ConfigManager()
