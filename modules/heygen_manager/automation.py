@@ -12,13 +12,28 @@ def get_browser_path():
 
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = get_browser_path()
 
-def _install_playwright_browsers(log_callback=None):
+def find_chrome_executable(base_path):
+    """递归查找目录下的 chrome.exe"""
+    if not os.path.exists(base_path):
+        return None
+    for root, dirs, files in os.walk(base_path):
+        if "chrome.exe" in files:
+            return os.path.join(root, "chrome.exe")
+    return None
+
+def install_playwright_browsers(log_callback=None, force=False):
     browser_path = get_browser_path()
-    if os.path.exists(browser_path) and any("chromium" in x for x in os.listdir(browser_path) if os.path.isdir(os.path.join(browser_path, x))):
+    # Improved check: check for any folder that contains chromium or chrome-win
+    is_installed = os.path.exists(browser_path) and any(
+        ("chromium" in x or "chrome-win" in x) for x in os.listdir(browser_path) 
+        if os.path.isdir(os.path.join(browser_path, x))
+    )
+    
+    if not force and is_installed:
         return True
 
     if log_callback:
-        log_callback("📦 初次运行：正在下载 Playwright 浏览器组件 (~150MB)，请稍候...")
+        log_callback("📦 正在准备环境并下载浏览器组件 (~150MB)，请稍候...")
     
     try:
         from playwright._impl._driver import compute_driver_executable, get_driver_env
@@ -31,19 +46,51 @@ def _install_playwright_browsers(log_callback=None):
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True
+            text=True,
+            bufsize=1
         )
-        for line in proc.stdout:
-            if line and log_callback:
-                # We log selectively to avoid spamming the UI too much
-                if "Downloading" in line or "Playwright build" in line or "100%" in line:
-                    log_callback(f"下载进度: {line.strip()}")
+        
+        last_log_time = 0
+        current_progress = ""
+        
+        # We need to handle \r for progress bars
+        while True:
+            char = proc.stdout.read(1)
+            if not char:
+                break
+            
+            if char == '\r':
+                # Process the progress line
+                line = current_progress.strip()
+                if line and log_callback:
+                    # Look for percentage like "25%" or "100%"
+                    import re
+                    match = re.search(r"(\d+%)", line)
+                    if match:
+                        perc = match.group(1)
+                        # Throttle logs to avoid spamming the UI
+                        now = time.time()
+                        if now - last_log_time > 0.5 or perc == "100%":
+                            log_callback(f"📥 下载中: {perc}")
+                            last_log_time = now
+                current_progress = ""
+            elif char == '\n':
+                line = current_progress.strip()
+                if line and log_callback:
+                    if "Downloading" in line or "Playwright build" in line:
+                        log_callback(f"📦 {line}")
+                current_progress = ""
+            else:
+                current_progress += char
                 
         proc.wait()
         if proc.returncode == 0:
+            exe_path = find_chrome_executable(browser_path)
             if log_callback:
-                log_callback("✅ 浏览器组件下载完成！")
-            return True
+                log_callback(f"✅ 浏览器组件下载并自动解压完成！")
+                if exe_path:
+                    log_callback(f"📍 找到可执行文件: {exe_path}")
+            return exe_path if exe_path else True
         else:
             if log_callback:
                 log_callback(f"❌ 浏览器安装失败，退出码: {proc.returncode}")
@@ -57,13 +104,15 @@ def _install_playwright_browsers(log_callback=None):
 from playwright.async_api import async_playwright
 
 class HeyGenAutomation:
-    def __init__(self, instance_id=0, log_callback=None, status_callback=None):
+    def __init__(self, instance_id=0, log_callback=None, status_callback=None, **kwargs):
         """
         :param instance_id: 实例唯一 ID
         :param log_callback: UI 日志回调 函数 (str)
         :param status_callback: UI 状态回调 函数 (id, status, url, action)
+        :param executable_path: 自定义浏览器绝对路径 (例如 Chrome/Edge 控制台的 exe 路径)
         """
         self.instance_id = instance_id
+        self.executable_path = kwargs.get("executable_path", None)
         self.playwright = None
         self.browser = None
         self.context = None
@@ -88,13 +137,19 @@ class HeyGenAutomation:
         self.log(f"🚀 正在启动 Playwright 浏览器...")
         try:
             # 确保浏览器组件已安装（阻塞等待以保证线程安全）
-            _install_playwright_browsers(self.log)
+            if not self.executable_path:
+                install_playwright_browsers(self.log)
 
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=headless,
-                args=["--start-maximized"]
-            )
+            
+            launch_args = {
+                "headless": headless,
+                "args": ["--start-maximized"]
+            }
+            if self.executable_path:
+                launch_args["executable_path"] = self.executable_path
+
+            self.browser = await self.playwright.chromium.launch(**launch_args)
             
             # Load storage state if provided and exists
             context_args = {"no_viewport": True}

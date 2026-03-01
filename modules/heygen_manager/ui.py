@@ -5,12 +5,28 @@ import threading
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
     QLabel, QGroupBox, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QCheckBox, QTextEdit, QFileDialog, QSpinBox
+    QHeaderView, QCheckBox, QTextEdit, QFileDialog, QSpinBox, QLineEdit
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from .automation import HeyGenAutomation
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
+from .automation import HeyGenAutomation, install_playwright_browsers
 from .data_pool import EmailPool, LinkPool
 from .session_manager import SessionManager
+
+class BrowserDownloadWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(object) # Can be bool or str (path)
+
+    def __init__(self, force=False, parent=None):
+        super().__init__(parent)
+        self.force = force
+
+    def run(self):
+        try:
+            result = install_playwright_browsers(lambda msg: self.log_signal.emit(msg), force=self.force)
+            self.finished_signal.emit(result)
+        except Exception as e:
+            self.log_signal.emit(f"❌ 下载崩溃: {e}")
+            self.finished_signal.emit(False)
 
 # --- 1. 异步执行 Worker (单实例执行逻辑) ---
 class SingleInstanceWorker(QThread):
@@ -18,11 +34,12 @@ class SingleInstanceWorker(QThread):
     status_signal = pyqtSignal(int, str, str, str) # index, status, url, action
     finished_signal = pyqtSignal(int, str, bool) # index, action_type, success
 
-    def __init__(self, instance_id, email_pool=None, link_pool=None, parent=None):
+    def __init__(self, instance_id, email_pool=None, link_pool=None, executable_path=None, parent=None):
         super().__init__(parent)
         self.instance_id = instance_id
         self.email_pool = email_pool
         self.link_pool = link_pool
+        self.executable_path = executable_path
         self.automation = None
         self.loop = None
         self._tasks_queue = None
@@ -41,7 +58,8 @@ class SingleInstanceWorker(QThread):
             self.automation = HeyGenAutomation(
                 instance_id=self.instance_id,
                 log_callback=self.emit_log,
-                status_callback=self.emit_status
+                status_callback=self.emit_status,
+                executable_path=self.executable_path
             )
 
             self.loop.run_forever()
@@ -167,6 +185,8 @@ class SingleInstanceWorker(QThread):
 class HeyGenManagerUI(QWidget):
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("QuickTools", "HeyGenManager")
+        self.executable_path = self.settings.value("browser_executable_path", "")
         self.email_pool = EmailPool()
         self.link_pool = LinkPool()
         self.session_manager = SessionManager()
@@ -180,6 +200,26 @@ class HeyGenManagerUI(QWidget):
         # A. 监控与核心控制 (分段按钮)
         ctrl_box = QGroupBox("🎮 自动化流水线控制")
         ctrl_layout = QVBoxLayout()
+        
+        # 0. 浏览器设置
+        browser_layout = QHBoxLayout()
+        browser_layout.addWidget(QLabel("浏览器路径:"))
+        
+        self.input_browser_path = QLineEdit()
+        self.input_browser_path.setPlaceholderText("留空则使用默认，或选择 Chrome/Edge.exe")
+        self.input_browser_path.setText(self.executable_path)
+        self.input_browser_path.textChanged.connect(self.save_browser_path)
+        browser_layout.addWidget(self.input_browser_path)
+
+        self.btn_select_browser = QPushButton("📁 浏览")
+        self.btn_select_browser.clicked.connect(self.action_select_browser)
+        browser_layout.addWidget(self.btn_select_browser)
+
+        self.btn_download_browser = QPushButton("⬇️ 下载组件")
+        self.btn_download_browser.clicked.connect(self.action_download_browser)
+        browser_layout.addWidget(self.btn_download_browser)
+        
+        ctrl_layout.addLayout(browser_layout)
         
         # 第一行：启动控制
         launch_layout = QHBoxLayout()
@@ -331,6 +371,38 @@ class HeyGenManagerUI(QWidget):
         self.log(f"🔗 已投递 {len(links)} 个链接 (60s 过期)")
         self.input_link.clear()
 
+    def save_browser_path(self, text):
+        self.executable_path = text.strip()
+        self.settings.setValue("browser_executable_path", self.executable_path)
+
+    def action_select_browser(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择浏览器执行文件", "", "Executables (*.exe);;All Files (*)")
+        if path:
+            self.input_browser_path.setText(path)
+            self.save_browser_path(path)
+            self.log(f"✅ 已设置自定义浏览器路径: {path}")
+
+    def action_download_browser(self):
+        self.btn_download_browser.setEnabled(False)
+        self.log("📦 正在检查并准备下载 Playwright 浏览器组件，请稍候...")
+        # Force download when clicking manually
+        self.download_worker = BrowserDownloadWorker(force=True)
+        self.download_worker.log_signal.connect(self.log)
+        self.download_worker.finished_signal.connect(self.on_download_finished)
+        self.download_worker.start()
+
+    def on_download_finished(self, result):
+        self.btn_download_browser.setEnabled(True)
+        if result:
+            self.log("✨ 浏览器组件已就绪！")
+            if isinstance(result, str):
+                self.input_browser_path.setText(result)
+                self.save_browser_path(result)
+                self.log(f"🚀 已自动指定组件路径: {result}")
+            self.log("📌 现在您可以点击“启动浏览器”了。")
+        else:
+            self.log("❌ 浏览器组件安装失败，请检查网络连接或手动运行 playwright install。")
+
     # --- Backup Logic ---
     def on_chk_backup_changed(self):
         if self.chk_load_backup.isChecked():
@@ -387,7 +459,12 @@ class HeyGenManagerUI(QWidget):
         self.workers = {}
 
         for i in range(1, count + 1):
-            worker = SingleInstanceWorker(i, email_pool=self.email_pool, link_pool=self.link_pool)
+            worker = SingleInstanceWorker(
+                i, 
+                email_pool=self.email_pool, 
+                link_pool=self.link_pool,
+                executable_path=self.executable_path
+            )
             worker.log_signal.connect(self.log)
             worker.status_signal.connect(self.update_monitor)
             worker.finished_signal.connect(self.on_action_finished)
