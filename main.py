@@ -79,6 +79,8 @@ class DesktopApp(QMainWindow):
                 self.tab_audio.update_default_path(d)
             if hasattr(self, 'tab_file'):
                 self.tab_file.update_default_path(d)
+            if hasattr(self, 'tab_video'):
+                self.tab_video.update_default_path(d)
 
     def init_tabs(self):
         # 音频工具页
@@ -86,10 +88,10 @@ class DesktopApp(QMainWindow):
         self.tab_audio = AudioManagerUI()
         self.tabs.addTab(self.tab_audio, "🎵 音频工具")
 
-        # 视频工具页占位符
-        self.tab_video = QWidget()
+        # 视频工具页
+        from modules.video_editor.ui import VideoEditorUI
+        self.tab_video = VideoEditorUI()
         self.tabs.addTab(self.tab_video, "🎬 视频工具")
-        self._setup_placeholder(self.tab_video, "视频拼接与编辑\n(开发中)")
 
         # 文本工具页占位符
         self.tab_text = QWidget()

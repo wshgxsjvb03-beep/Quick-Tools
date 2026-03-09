@@ -16,6 +16,7 @@ class AudioManagerUI(QWidget):
         self.match_widget = AudioMatchWidget(self.config)
         self.tabs.addTab(self.match_widget, "🔗 音画匹配")
         
+        
         # Instantiate separate widgets for each provider
         self.eleven_widget = AudioGenerateWidget(self.config, provider="ElevenLabs")
         self.tabs.addTab(self.eleven_widget, "🎤 ElevenLabs 生成")

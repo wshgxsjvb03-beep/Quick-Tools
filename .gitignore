@@ -7,3 +7,8 @@ logs_extracted/
 build/
 dist/
 check_ci.py
+__pycache__/
+*.pyc
+ffmpeg.exe
+config.json
+history.db

@@ -157,12 +157,24 @@ class AudioComparator:
                     arr = np.frombuffer(raw_frames, dtype=np.int16).astype(np.float32)
                 
                 if len(arr) == 0: return None
-                arr = arr - np.mean(arr)
-                std_dev = np.sqrt(np.mean(arr**2))
-                if std_dev < 10.0: return None
-                norm = np.linalg.norm(arr)
-                if norm > 0: arr = arr / norm
-                return arr
+                
+                # Create an audio energy/volume envelope (50ms windows)
+                # This makes the signature incredibly robust to phase shifts and compression artifacts
+                window_size = int(fps * 0.05) 
+                if window_size == 0: window_size = 1
+                
+                num_windows = len(arr) // window_size
+                if num_windows == 0: return None
+                
+                arr = arr[:num_windows * window_size].reshape(num_windows, window_size)
+                # Compute RMS Volume for each window
+                envelope = np.sqrt(np.mean(arr**2, axis=1))
+                
+                if np.std(envelope) < 1e-6: return None
+                envelope = envelope - np.mean(envelope)
+                norm = np.linalg.norm(envelope)
+                if norm > 0: envelope = envelope / norm
+                return envelope
             finally:
                 if os.path.exists(temp_wav):
                     try: os.remove(temp_wav)
@@ -175,7 +187,7 @@ class AudioComparator:
         if audio_head_sig is None: return None
         best_match_name = None
         best_score = -1.0
-        duration_tolerance = 20.0 
+        duration_tolerance = 60.0 
         len_aud = len(audio_head_sig)
         scan_step = 20 
         fps = 12000
@@ -189,51 +201,40 @@ class AudioComparator:
             len_vid = len(vid_sig)
             if len_vid < len_aud:
                 val_len = min(len_vid, len_aud)
-                if val_len < 1000: continue
+                if val_len < 20: continue # need at least 1 second of envelope
                 s1 = audio_head_sig[:val_len]
                 s2 = vid_sig[:val_len]
                 try: score = np.corrcoef(s1, s2)[0,1]
                 except: score = 0.0
             else:
                 max_offset_val = -1.0
-                max_shift_frames = int(2.0 * fps)
-                search_range = min(len_vid - len_aud, max_shift_frames)
+                search_range = len_vid - len_aud
                 
                 if search_range <= 0:
-                    try: max_offset_val = np.corrcoef(audio_head_sig, vid_sig[:len_aud])[0,1]
+                    try: 
+                        max_offset_val = np.corrcoef(audio_head_sig, vid_sig[:len_aud])[0,1]
                     except: max_offset_val = 0.0
                 else:
-                    found_best_idx = 0
+                    # Simple sliding window on the condensed envelope array is extremely fast
                     local_max = -1.0
-                    for start_idx in range(0, search_range + 1, scan_step):
+                    for start_idx in range(search_range + 1):
                         v_slice = vid_sig[start_idx : start_idx + len_aud]
-                        dot_val = np.dot(audio_head_sig, v_slice)
-                        norm_v = np.linalg.norm(v_slice)
-                        if norm_v > 0.001:
-                            raw_score = dot_val / norm_v
-                            if raw_score > local_max:
-                                local_max = raw_score
-                                found_best_idx = start_idx
-                    
-                    refine_range = 100 
-                    r_start = max(0, found_best_idx - refine_range)
-                    r_end = min(search_range, found_best_idx + refine_range)
-                    final_local_max = -1.0
-                    for start_idx in range(r_start, r_end + 1, 5): 
-                        v_slice = vid_sig[start_idx : start_idx + len_aud]
-                        norm_v = np.linalg.norm(v_slice)
-                        if norm_v > 0.001:
-                            score = np.dot(audio_head_sig, v_slice) / norm_v
-                            if score > final_local_max:
-                                final_local_max = score
-                    max_offset_val = final_local_max
+                        try:
+                            # np.corrcoef is safe here since envelope array is tiny (~200 items)
+                            s = np.corrcoef(audio_head_sig, v_slice)[0,1]
+                            if s > local_max:
+                                local_max = s
+                        except:
+                            continue
+                    max_offset_val = local_max
                 score = max_offset_val
 
             if score > best_score:
                 best_score = score
                 best_match_name = item['name']
 
-        if best_match_name and best_score > 0.82:
+        # 0.55 threshold handles volume envelope comparisons well
+        if best_match_name and best_score > 0.55:
             return (best_match_name, best_score)
         return None
 
@@ -295,7 +296,8 @@ class MatchWorker(QThread):
                     info = AudioUtils.get_audio_info(v_path)
                     dur = info['duration_seconds'] if info else 0
                     if dur > 0:
-                        head_sig = AudioComparator.get_head_signature(v_path, duration=7.0)
+                        # Extract 12 seconds instead of 7 to get more unique volume envelope
+                        head_sig = AudioComparator.get_head_signature(v_path, duration=12.0)
                         video_db.append({'name': v_name, 'path': v_path, 'duration': dur, 'head_sig': head_sig, 'matched': False})
                 except: pass
             self.progress_log.emit(f"✅ 视频索引完成. 有效数据: {len(video_db)} 条")
@@ -320,7 +322,7 @@ class MatchWorker(QThread):
                     fail_list.append(f"{aud_name} (坏文件)")
                     continue
                 aud_dur = aud_info['duration_seconds']
-                aud_head_sig = AudioComparator.get_head_signature(aud_path, duration=5.0)
+                aud_head_sig = AudioComparator.get_head_signature(aud_path, duration=8.0)
                 if aud_head_sig is None:
                     fail_list.append(f"{aud_name} (静音/错误)")
                     continue
@@ -358,10 +360,172 @@ class MatchWorker(QThread):
                                     self.progress_log.emit(f"      ❌ 重命名出错: {e}")
                     success_count += 1
                 else:
-                    self.progress_log.emit(f"      ❌ 未匹配: {aud_name}")
+                    # 获取一些失败原因
+                    reason = "无匹配项"
+                    # 这里我们可以对 db 做一个简单的二次扫描，看看是否有虽然落榜但分值最高的
+                    best_fail_score = -1.0
+                    for item in video_db:
+                        if item.get('matched'): continue
+                        dur_diff = abs(item['duration'] - aud_dur)
+                        if dur_diff > 60.0: continue
+                        # 简单计算一下分值 (不做滑动匹配，仅开头)
+                        if item.get('head_sig') is not None:
+                            v_sig = item['head_sig']
+                            l = min(len(v_sig), len(aud_head_sig))
+                            if l > 20:
+                                try: sc = np.corrcoef(aud_head_sig[:l], v_sig[:l])[0,1]
+                                except: sc = 0.0
+                                if sc > best_fail_score: best_fail_score = sc
+                    
+                    if best_fail_score > 0:
+                        reason = f"相似度低 (最高: {best_fail_score:.3f})"
+                    else:
+                        reason = f"时长不匹配或全部排除"
+                    
+                    self.progress_log.emit(f"      ❌ 未匹配: {aud_name} ({reason})")
                     fail_list.append(aud_name)
             
             summary = f"匹配完成！\n总音频: {total_audio}\n成功: {success_count}\n失败/静音: {len(fail_list)}"
             self.finished.emit(summary)
         except Exception as e:
             self.error.emit(str(e))
+
+class AssembleWorker(QThread):
+    progress_log = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, video_dir, output_dir):
+        super().__init__()
+        self.video_dir = video_dir
+        self.output_dir = output_dir
+
+    def run(self):
+        try:
+            self.progress_log.emit("🔍 [Step 1] 扫描视频文件夹...")
+            
+            # 扫描并过滤常见的视频格式
+            files = [f for f in os.listdir(self.video_dir) 
+                     if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.flv'))]
+            
+            if not files:
+                self.error.emit("❌ 文件夹中未找到支持的视频文件！")
+                return
+                
+            # 排序（自然排序优先，这里简单使用按名称排序，前提是名称规则统一）
+            files.sort()
+            
+            self.progress_log.emit(f"✅ 找到 {len(files)} 个视频文件:")
+            for f in files:
+                self.progress_log.emit(f"   - {f}")
+                
+            self.progress_log.emit("\n⚙️ [Step 2] 按原视频分组...")
+            
+            # Group files by base name (everything before '_part')
+            import re
+            groups = {}
+            for f in files:
+                # e.g. "Name_part1.mp4" -> match "Name"
+                match = re.match(r"^(.*?)_part\d+\.(mp4|mov|avi|mkv|flv)$", f, re.IGNORECASE)
+                if match:
+                    base_name = match.group(1)
+                else:
+                    # Fallback if naming convention doesn't match perfectly
+                    base_name = os.path.splitext(f)[0]
+                
+                if base_name not in groups:
+                    groups[base_name] = []
+                groups[base_name].append(f)
+                
+            self.progress_log.emit(f"✅ 分为 {len(groups)} 个组。")
+            
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+                
+            # Loop through each group and create separate concat processes
+            success_count = 0
+            for base_name, group_files in groups.items():
+                if len(group_files) == 1:
+                    self.progress_log.emit(f"⚠️ 跳过组 '{base_name}': 只有一个视频片段。")
+                    continue
+                    
+                self.progress_log.emit(f"🚀 合并视频组: {base_name} ({len(group_files)} 个片段)...")
+                
+                # Sort the group carefully (handling numeric sorting for _part1, _part2, _part10 etc)
+                def sort_key(filename):
+                    match = re.search(r'_part(\d+)', filename, re.IGNORECASE)
+                    return int(match.group(1)) if match else 0
+                group_files.sort(key=sort_key)
+                
+                # create temp file
+                fd, list_file_path = tempfile.mkstemp(suffix=".txt", text=True)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    for v_file in group_files:
+                        safe_path = os.path.join(self.video_dir, v_file).replace("'", "'\\''")
+                        safe_path = safe_path.replace("\\", "/")
+                        f.write(f"file '{safe_path}'\n")
+                        
+                output_file = os.path.join(self.output_dir, f"{base_name}.mp4")
+                    
+                # 如果已存在，先删除或重命名
+                if os.path.exists(output_file):
+                    try:
+                        os.remove(output_file)
+                    except:
+                        import time
+                        output_file = os.path.join(self.output_dir, f"{base_name}_{int(time.time())}.mp4")
+            
+                # 获取 ffmpeg 可执行文件路径
+                try:
+                    local_ffmpeg = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, 'frozen', False) else __file__)), "ffmpeg.exe")
+                    if os.path.exists(local_ffmpeg):
+                        ffmpeg_exe = local_ffmpeg
+                    else:
+                        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                except:
+                    ffmpeg_exe = "ffmpeg"
+                    
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", list_file_path,
+                    "-c", "copy",
+                    output_file
+                ]
+                
+                creation_flags = 0
+                if os.name == 'nt':
+                     creation_flags = subprocess.CREATE_NO_WINDOW
+                     
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    creationflags=creation_flags,
+                    encoding='utf-8',
+                    errors='replace'
+                )
+                
+                stdout, stderr = process.communicate()
+                
+                try:
+                    os.remove(list_file_path)
+                except:
+                    pass
+                    
+                if process.returncode == 0:
+                    success_count += 1
+                    self.progress_log.emit(f"   -> 成功保存在: {output_file}")
+                else:
+                    self.progress_log.emit(f"⚠️ FFmpeg Error for {base_name}:\n{stderr}")
+            
+            if success_count > 0:
+                self.progress_log.emit(f"\n🎉 [Step 3] 任务完成！成功合并了 {success_count} 个视频。")
+                self.finished.emit(f"合并任务完成！\n成功输出了 {success_count} 个拼接好的视频，存放在半成品文件夹中。")
+            else:
+                self.error.emit(f"未能成功合并任何视频。")
+                
+        except Exception as e:
+            self.error.emit(f"合并过程发生异常: {str(e)}")
