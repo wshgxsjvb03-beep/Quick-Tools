@@ -1,131 +1,130 @@
 import os
 import requests
 import re
-from urllib.parse import urlparse
+import datetime
+import json
+from bs4 import BeautifulSoup
 
 class FileManager:
     @staticmethod
-    def parse_input_batch(text):
+    def parse_clipboard_html(html_text):
         """
-        解析输入文本（支持多行）。
-        使用 CSV 模块处理 Excel 复制的复杂情况（如单元格内换行、引号包裹等）。
-        返回: list of (text1, text2, link)
-        """
-        text = text.strip()
-        if not text:
-            return []
-            
-        import csv
-        import io
+        从剪贴板的 HTML 内容中解析表格数据。
+        提取列：
+        0: 项目名 (主)
+        3: 中文
+        4: 西班牙语 (会进行清理)
+        5: 图片 (提取所有 <a>)
+        6: 备注/副标题 (提取文字作为副标，提取所有 <a> 供下载)
         
+        返回: list of dicts
+        """
         results = []
-        try:
-            # 使用制表符作为分隔符，这是 Excel/Sheets 复制的标准格式
-            # io.StringIO 让字符串像文件一样被读取
-            f = io.StringIO(text)
-            reader = csv.reader(f, delimiter='\t')
-            
-            for parts in reader:
-                # 过滤空的列
-                clean_parts = [p.strip() for p in parts if p.strip()]
-                
-                # 如果分列少于3列，尝试处理非标准情况 (可能是空格分隔)
-                if len(clean_parts) < 3 and len(parts) > 0:
-                    # 尝试把原始行用空格分一下看看 (针对非表格复制的情况)
-                    # csv reader 已经处理了引号，所以我们这里重新组合一下再分有点多余
-                    # 但为了兼容之前的"宽松正则"，我们可以把这一行重新当作 raw text 处理
-                    raw_line = " ".join(parts) 
-                    fallback_item = FileManager._parse_single_line_fallback(raw_line)
-                    if fallback_item:
-                        results.append(fallback_item)
-                    continue
+        if not html_text:
+            return results
 
-                if len(clean_parts) >= 3:
-                    link = None
-                    text_parts = []
+        try:
+            soup = BeautifulSoup(html_text, 'html.parser')
+            # 找到所有的 tr 行
+            rows = soup.find_all('tr')
+            
+            for row in rows:
+                cols = row.find_all(['td', 'th'])
+                if len(cols) < 7: # 至少需要7列
+                    continue
                     
-                    for p in clean_parts:
-                        # csv 模块已经自动去除了引号，所有我们只需要查找链接
-                        
-                        # 检查链接 (移除可能存在的空白字符干扰)
-                        potential_link = p.replace(' ', '').replace('\n', '').replace('\r', '')
-                 
-                        if not link and (potential_link.lower().startswith('http') or 
-                                         'drive.google.com' in potential_link.lower()):
-                            link = potential_link
-                        else:
-                            text_parts.append(p) # 保持原样文本
+                # 第一列：项目主名
+                main_name = cols[0].get_text(strip=True)
+                
+                # 第四列：中文文案
+                cn_text = FileManager._extract_text_with_newlines(cols[3])
+                
+                # 第五列：西班牙语文案 (需要清洗)
+                es_text_raw = FileManager._extract_text_with_newlines(cols[4])
+                es_text = FileManager.clean_spanish_text(es_text_raw)
+                
+                # 第六、七列 (索引为5和6) 提取链接与副标题
+                links = []
+                # 先提取链接 (包含 <a> 标签的，以及纯文本里的网址)
+                for idx in [5, 6]:
+                    # 1. HTML <a> 标签
+                    a_tags = cols[idx].find_all('a')
+                    for a in a_tags:
+                        href = a.get('href')
+                        if href and href.startswith('http') and href not in links:
+                            links.append(href)
+                            
+                    # 2. 纯文本网址 (如果 Google 表格只是一串文字 没有超链接格式)
+                    raw_text = cols[idx].get_text(separator=' ')
+                    urls = re.findall(r'(https?://[^\s]+)', raw_text)
+                    for u in urls:
+                        if u not in links:
+                            links.append(u)
+                
+                # 提取副标题逻辑：严格互斥提取，避免无关说明污染
+                has_link_5 = len(cols[5].find_all('a')) > 0 or re.search(r'https?://', cols[5].get_text())
+                has_link_6 = len(cols[6].find_all('a')) > 0 or re.search(r'https?://', cols[6].get_text())
+                
+                def get_clean_text(col):
+                    """提取文本并移除其中的原始 URL"""
+                    text = col.get_text(separator=' ', strip=True)
+                    return re.sub(r'https?://[^\s]+', '', text).strip()
                     
-                    if link and len(text_parts) >= 2:
-                        # 找到链接和至少两个文本
-                        results.append((text_parts[0], text_parts[1], link))
-                        
+                sub_name_raw = ""
+                if has_link_5 and not has_link_6:
+                    # 如果只有 5 有链接，说明 6 肯定是专属副标题
+                    sub_name_raw = get_clean_text(cols[6])
+                elif has_link_6 and not has_link_5:
+                    # 如果只有 6 有链接，说明 5 肯定是专属副标题
+                    sub_name_raw = get_clean_text(cols[5])
+                else:
+                    # 如果两者都有链接，或都没有，则只能合并过滤
+                    t5 = get_clean_text(cols[5])
+                    t6 = get_clean_text(cols[6])
+                    sub_name_raw = f"{t5} {t6}".strip()
+                    
+                # 过滤非法路径字符并截断
+                sub_name = re.sub(r'[\\/:*?"<>|]', '', sub_name_raw)
+                sub_name = sub_name[:30].strip() # 限制长度
+                
+                if main_name or cn_text or es_text:
+                    results.append({
+                        'main_name': main_name,
+                        'sub_name': sub_name,
+                        'cn_text': cn_text,
+                        'es_text': es_text,
+                        'links': links,
+                        'raw_source': str(row) # 保存一份原始 HTML 便于 debug
+                    })
+
         except Exception as e:
-            FileManager.log_error(f"CSV Parse Error: {e}")
+            print(f"HTML Parse Error: {e}")
             
         return results
 
     @staticmethod
-    def _parse_single_line_fallback(text):
-        """
-        后备解析逻辑：针对非标准制表符分隔的一行文本
-        """
-        # 尝试宽松正则分割 (空格)
-        url_match = re.search(r'(https?://[^\s]+)', text.replace(' ', ''))
-        parts = []
-        if url_match:
-            parts = re.split(r'\s{2,}', text)
-        else:
-            return None
-            
-        parts = [p.strip() for p in parts if p.strip()]
-        
-        if len(parts) >= 3:
-            # 简化的查找逻辑
-            link = None
-            text_parts = []
-            for p in parts:
-                clean = p.replace('"', '') # 简单去引号
-                if not link and ('http' in clean.lower() or 'drive.google.com' in clean.lower()):
-                    link = clean
-                else:
-                    text_parts.append(clean)
-                    
-            if link and len(text_parts) >= 2:
-                return text_parts[0], text_parts[1], link
-        return None
+    def _extract_text_with_newlines(cell_element):
+        """尽可能保留单元格内的换行"""
+        # 将 <br> 替换为换行符
+        for br in cell_element.find_all("br"):
+            br.replace_with("\n")
+        return cell_element.get_text(strip=False).strip()
 
     @staticmethod
-    def save_batch_text(items, output_file_path):
+    def clean_spanish_text(text):
         """
-        保存批量数据到单个 TXT 文件。
-        格式：
-        1
-        Text1
-        ------------------------------ (30个-)
-        Text2
-        ============================== (30个=)
+        专用于清理西班牙语文案中的无用特殊符号，保留基础标点和字母。
+        过滤 ✝️ 以及其他 emoji。
         """
-        try:
-            os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
-            
-            content_list = []
-            for i, (t1, t2, link) in enumerate(items, 1):
-                # 格式构造
-                entry = f"{i}\n{t1}\n{'-' * 30}\n{t2}\n{'=' * 30}"
-                content_list.append(entry)
-            
-            # 所有记录用换行连接
-            full_content = "\n\n".join(content_list)
-            
-            with open(output_file_path, 'w', encoding='utf-8') as f:
-                f.write(full_content)
-            
-            return True, "文件保存成功"
-        except Exception as e:
-            error = f"保存 TXT 失败: {str(e)}"
-            FileManager.log_error(error)
-            return False, error
+        if not text:
+            return ""
+        # 移除常见的 emoji 和特定符号 (这里使用一个简单范围粗略过滤)
+        # 清除 ✝ 及其变体，以及其他常见的杂项符号
+        cleaned = re.sub(r'[\u271D\uFE0F✝]', '', text)
+        
+        # 移除多余空白
+        cleaned = re.sub(r'[ \t]+', ' ', cleaned).strip()
+        return cleaned
 
     @staticmethod
     def clean_and_merge_text(text, threshold=300):
@@ -166,17 +165,10 @@ class FileManager:
 
     @staticmethod
     def get_google_drive_id(url):
-        """
-        从 Google Drive 链接中提取 File ID
-        支持 formats:
-        - https://drive.google.com/file/d/FILE_ID/view...
-        - https://drive.google.com/open?id=FILE_ID
-        """
         patterns = [
             r'/file/d/([a-zA-Z0-9_-]+)',
             r'id=([a-zA-Z0-9_-]+)'
         ]
-        
         for p in patterns:
             match = re.search(p, url)
             if match:
@@ -186,34 +178,31 @@ class FileManager:
     @staticmethod
     def download_file(url, save_path_base):
         """
-        下载文件。尝试自动识别 Google Drive 链接。
-        save_path_base: 这里是文件名（不含扩展名），需要检测内容类型后添加扩展名。
+        下载文件。
+        save_path_base: 这里是文件名（不含扩展名）。
         返回: (success, final_path_or_error)
         """
         try:
-            # 1. 处理 Google Drive 链接
             file_id = FileManager.get_google_drive_id(url)
             download_url = url
             
             if file_id:
-                # 转换为直接下载链接
                 download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
             
-            # 2. 发起请求
-            response = requests.get(download_url, stream=True)
+            response = requests.get(download_url, stream=True, timeout=30)
             response.raise_for_status()
             
-            # 3. 确定扩展名
             content_type = response.headers.get('content-type', '')
-            ext = '.bin' # 默认
+            ext = '.bin' 
             if 'image/jpeg' in content_type:
                 ext = '.jpg'
             elif 'image/png' in content_type:
                 ext = '.png'
             elif 'application/pdf' in content_type:
                 ext = '.pdf'
+            elif 'video/mp4' in content_type:
+                ext = '.mp4'
             else:
-                # 尝试从 Content-Disposition 获取文件名
                 if "Content-Disposition" in response.headers:
                     from email.message import EmailMessage
                     msg = EmailMessage()
@@ -221,15 +210,116 @@ class FileManager:
                     filename = msg.get_filename()
                     if filename:
                         _, ext = os.path.splitext(filename)
+                        if not ext:
+                            ext = '.bin'
             
             final_path = f"{save_path_base}{ext}"
             
-            # 4. 保存文件
+            if os.path.exists(final_path):
+                # 如果文件已存在，为避免覆盖，添加时间戳
+                timestamp = datetime.datetime.now().strftime("%H%M%S")
+                final_path = f"{save_path_base}_{timestamp}{ext}"
+            
             with open(final_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                    if chunk:
+                        f.write(chunk)
                     
             return True, final_path
             
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_unique_base_name(output_root, item_data, index=None):
+        """生成无冲突的基础文件名（默认包含顺序编号）"""
+        main_name = item_data.get('main_name', '未命名项目')
+        # 处理可能的特殊字符
+        safe_main_name = re.sub(r'[\\/:*?"<>|]', '_', main_name)
+        
+        sub_name = item_data.get('sub_name', '')
+        base_name = f"{safe_main_name}-{sub_name}" if sub_name else safe_main_name
+        
+        # 默认加上批处理的编号前缀 (例如 01_主名-副名)，保证在文件夹里按顺序排列
+        if index is not None:
+            base_name = f"{index:02d}_{base_name}"
+        
+        final_base = base_name
+        counter = 1
+        # 只要存在相关的 txt 就认为在此序号冲突
+        while os.path.exists(os.path.join(output_root, f"{final_base}.txt")):
+            final_base = f"{base_name}_{counter:02d}"
+            counter += 1
+            
+        return final_base
+
+    @staticmethod
+    def save_combined_text(output_root, base_name, item_data):
+        """将同一项目的中英文案合并保存为单个 txt，通过 --------- 分割"""
+        cn_text = FileManager.clean_and_merge_text(item_data.get('cn_text', ''))
+        es_text = FileManager.clean_and_merge_text(item_data.get('es_text', ''))
+        
+        content = ""
+        if cn_text:
+            content += cn_text
+        if cn_text and es_text:
+            content += "\n\n----------\n\n"
+        if es_text:
+            content += es_text
+            
+        if not content:
+            # 即使没文案，也给个空文件代表项目创建了
+            content = "无文本内容"
+            
+        txt_path = os.path.join(output_root, f"{base_name}.txt")
+        try:
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return True, txt_path
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def wrap_spanish_for_subtitles(text, words_per_line=4):
+        """
+        根据用户需求，将西语文本按每行约 3-4 个单词进行断行。
+        """
+        if not text:
+            return ""
+            
+        # 先清除现有换行并合并为空格
+        text = text.replace('\n', ' ').strip()
+        words = text.split()
+        
+        lines = []
+        for i in range(0, len(words), words_per_line):
+            line = " ".join(words[i : i + words_per_line])
+            if line:
+                lines.append(line)
+                
+        return "\n".join(lines)
+
+    @staticmethod
+    def save_subtitle_file(output_root, base_name, content):
+        """
+        建立统一的字幕文件夹，并将所有项目的字幕 txt 都存入其中
+        """
+        if not content:
+            return True, None
+            
+        # 统一存放在根目录下的“字幕”文件夹内
+        sub_dir = os.path.join(output_root, "字幕")
+        try:
+            if not os.path.exists(sub_dir):
+                os.makedirs(sub_dir)
+            
+            # 文件名与项目名一样，直接存入统一的“字幕”文件夹
+            filename = f"{base_name}.txt"
+            txt_path = os.path.join(sub_dir, filename)
+            
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+                
+            return True, txt_path
         except Exception as e:
             return False, str(e)

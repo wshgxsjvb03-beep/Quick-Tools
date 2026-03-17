@@ -64,6 +64,13 @@ class AudioGenerateWidget(QWidget):
         self.key_info_workers = [] # 存储 Worker 引用，防止被垃圾回收
         self.fixed_provider = provider
         self.current_provider = provider if provider else "ElevenLabs" # Default provider
+        
+        # Initialize BridgeServer for Browser Mode
+        from ..services import BridgeServer
+        self.bridge_server = BridgeServer(port=9999)
+        self.bridge_server.message_received.connect(self.handle_bridge_message)
+        self.bridge_server.start()
+        
         self.init_ui()
         if self.config:
             self.load_tasks()
@@ -92,6 +99,11 @@ class AudioGenerateWidget(QWidget):
         self.key_combo.setMinimumWidth(200) # Give it some width
         self.refresh_key_combo()
         row2_layout.addWidget(self.key_combo)
+
+        # 简化模式：固定使用当前选中 Key，不做智能调度/轮询
+        self.chk_simple_mode = QCheckBox("仅用当前 Key（不智能分配）")
+        self.chk_simple_mode.setToolTip("勾选后，所有任务都固定使用上方选中的 Key，不再做余额调度和备用 Key 轮询，方便免费版做小规模实验。")
+        row2_layout.addWidget(self.chk_simple_mode)
         
         row2_layout.addStretch()
         
@@ -178,6 +190,12 @@ class AudioGenerateWidget(QWidget):
         self.chk_auto_voice = QCheckBox("🌌 自动管理云端声线 (动态释放 3/3 额度)")
         self.chk_auto_voice.setChecked(True)
         adv_settings.addWidget(self.chk_auto_voice)
+
+        self.chk_browser_mode = QCheckBox("🖥️ 网页插件模式 (不耗API)")
+        self.chk_browser_mode.setToolTip("开启后将通过浏览器插件生成音频，不占用 API 额度，需要先在 Chrome 中安装插件并保持 ElevenLabs 页面打开。")
+        self.chk_browser_mode.setChecked(self.config.get_elevenlabs_browser_mode())
+        self.chk_browser_mode.stateChanged.connect(lambda state: self.config.set_elevenlabs_browser_mode(state == Qt.CheckState.Checked.value))
+        adv_settings.addWidget(self.chk_browser_mode)
         
         adv_settings.addStretch()
         
@@ -271,6 +289,10 @@ class AudioGenerateWidget(QWidget):
         else:
             self.run_btn.setText("🎤 开始批量生成音频 (Google AI)")
             self.run_btn.setStyleSheet("font-weight: bold; background-color: #4285F4; color: white;")
+        
+        # Only show browser mode for ElevenLabs
+        if hasattr(self, 'chk_browser_mode'):
+            self.chk_browser_mode.setVisible(provider == "ElevenLabs")
 
     def refresh_key_combo(self):
         self.key_combo.clear()
@@ -604,9 +626,24 @@ class AudioGenerateWidget(QWidget):
         self.log_area.repaint() # Force update UI
             
         if provider == "ElevenLabs":
-            self.update_run_button_state(True)
-            self.log_area.append("🔄 正在联网同步 Key 余额...")
-            self.process_scheduling(tasks, selected_mode, keys_data, output_dir)
+            # 简化模式：不做智能调度/轮询，仅使用当前选中的单个 Key
+            if self.chk_simple_mode.isChecked():
+                key_to_use = selected_mode
+                if key_to_use == "auto":
+                    # 如果用户仍然选择了“智能自动分配”，在简化模式下退化为使用第一个 Key
+                    key_to_use = keys_data[0]['key']
+                    self.log_area.append("⚠️ 简化模式下选择了“智能自动分配”，将临时使用列表中的第一个 Key。")
+                allocated = []
+                for task in tasks:
+                    t = task.copy()
+                    t['api_key'] = key_to_use
+                    allocated.append(t)
+                self.log_area.append(f"🎯 简化模式生效：本次所有任务仅使用 Key {key_to_use[-4:]}。")
+                self.start_elevenlabs_worker(allocated, output_dir, keys_data)
+            else:
+                self.update_run_button_state(True)
+                self.log_area.append("🔄 正在联网同步 Key 余额...")
+                self.process_scheduling(tasks, selected_mode, keys_data, output_dir)
         else:
             self.log_area.append("🔄 正在准备 Google AI 生成任务...")
             allocated = []
@@ -665,6 +702,48 @@ class AudioGenerateWidget(QWidget):
                 self.run_btn.setStyleSheet("font-weight: bold; background-color: #4285F4; color: white;")
             self.run_btn.setEnabled(True)
 
+    def handle_bridge_message(self, msg):
+        """处理来自浏览器插件的消息 (通过 Native Host 中转)"""
+        action = msg.get("action")
+        if action == "audio_generated":
+            status = msg.get("status")
+            if status == "success":
+                audio_b64 = msg.get("audio")
+                name = msg.get("name", "generated_audio")
+                if audio_b64:
+                    import base64
+                    import os
+                    try:
+                        audio_data = base64.b64decode(audio_b64)
+                        output_dir = self.out_edit.text()
+                        if not os.path.exists(output_dir):
+                            os.makedirs(output_dir)
+                        
+                        # 如果没有后缀则添加 .mp3
+                        if not name.endswith(".mp3"):
+                            filename = f"{name}.mp3"
+                        else:
+                            filename = name
+                            
+                        file_path = os.path.join(output_dir, filename)
+                        with open(file_path, "wb") as f:
+                            f.write(audio_data)
+                        
+                        self.log_area.append(f"✅ [浏览器同步] 已保存音频: {filename}")
+                        # 尝试更新表格状态 (如果匹配到名字)
+                        for row in range(self.table.rowCount()):
+                            if self.table.item(row, 1).text() == name:
+                                # 假设这里是更新状态的逻辑，可以根据需要实现
+                                pass
+                    except Exception as e:
+                        self.log_area.append(f"❌ [浏览器同步] 保存失败: {str(e)}")
+            else:
+                error_msg = msg.get("error", "未知错误")
+                self.log_area.append(f"❌ [浏览器同步] 生成失败: {error_msg}")
+        
+        elif action == "pong":
+            self.log_area.append("📡 [浏览器同步] 已检测到插件连接成功！")
+
     def do_scheduling_and_run(self, tasks, selected_mode, output_dir, keys_data):
         if self._is_stopping:
             self.update_run_button_state(False)
@@ -673,7 +752,7 @@ class AudioGenerateWidget(QWidget):
         provider = self.current_provider
         allocated_tasks = []
         unallocated_names = []
-
+        
         if provider == "ElevenLabs":
             allocated_tasks, unallocated_names = self.schedule_algorithm(tasks, selected_mode, self.balance_results)
             if unallocated_names:
@@ -685,28 +764,20 @@ class AudioGenerateWidget(QWidget):
                     return
         else:
             allocated_tasks = tasks
-
+        
         if not allocated_tasks:
             self.update_run_button_state(False)
             return
+        
+        if provider == "ElevenLabs":
+            self.start_elevenlabs_worker(allocated_tasks, output_dir, keys_data)
+            return
 
+        # Google AI 分支保持原有逻辑
         self.update_run_button_state(True)
         clear_out = self.chk_clear_out.isChecked()
 
-        if provider == "ElevenLabs":
-            model_id = self.config.get_elevenlabs_model_id()
-            default_voice_id = self.config.get_elevenlabs_voice_id()
-            dict_id = self.dict_id_edit.text().strip() or None
-            auto_voice = self.chk_auto_voice.isChecked()
-            all_keys = [k['key'] for k in keys_data]
-            self.worker = ElevenLabsWorker(allocated_tasks, output_dir, 
-                                           all_keys_pool=all_keys,
-                                           model_id=model_id, 
-                                           default_voice_id=default_voice_id,
-                                           clear_output=clear_out,
-                                           dict_id=dict_id,
-                                           auto_manage_voices=auto_voice)
-        else:
+        if provider != "ElevenLabs":
             model_id = self.config._config.get("google_ai_model_id", "gemini-2.5-flash-preview-tts")
             default_voice_id = self.config._config.get("google_ai_voice_id", "Zephyr")
             all_keys = [k['key'] for k in keys_data]
@@ -724,11 +795,53 @@ class AudioGenerateWidget(QWidget):
         def on_finished(msg):
             self.update_run_button_state(False)
             QMessageBox.information(self, "完成", msg)
-            if provider == "ElevenLabs":
-                self.auto_sync_used_keys(allocated_tasks)
-
+        
         self.worker.finished.connect(on_finished)
         self.worker.error.connect(lambda e: [self.update_run_button_state(False), self.log_area.append(f"❌ 错误: {e}")])
+        self.worker.start()
+
+    def start_elevenlabs_worker(self, allocated_tasks, output_dir, keys_data):
+        """统一启动 ElevenLabsWorker，供智能调度和简化模式复用"""
+        if not allocated_tasks:
+            self.update_run_button_state(False)
+            return
+
+        self.update_run_button_state(True)
+        clear_out = self.chk_clear_out.isChecked()
+
+        model_id = self.config.get_elevenlabs_model_id()
+        default_voice_id = self.config.get_elevenlabs_voice_id()
+        dict_id = self.dict_id_edit.text().strip() or None
+        auto_voice = self.chk_auto_voice.isChecked()
+        browser_mode = self.chk_browser_mode.isChecked()
+        all_keys = [k['key'] for k in keys_data] if keys_data else []
+        self.worker = ElevenLabsWorker(
+            allocated_tasks,
+            output_dir,
+            all_keys_pool=all_keys,
+            model_id=model_id,
+            default_voice_id=default_voice_id,
+            clear_output=clear_out,
+            dict_id=dict_id,
+            auto_manage_voices=auto_voice,
+            browser_mode=browser_mode,
+            bridge_server=self.bridge_server
+        )
+
+        self.worker.item_finished.connect(self._on_item_success)
+        self.worker.item_result.connect(self._on_item_result)
+        self.current_batch_tasks = allocated_tasks
+        self.worker.progress_log.connect(self.log_area.append)
+
+        def on_finished(msg):
+            self.update_run_button_state(False)
+            QMessageBox.information(self, "完成", msg)
+            self.auto_sync_used_keys(allocated_tasks)
+
+        self.worker.finished.connect(on_finished)
+        self.worker.error.connect(
+            lambda e: [self.update_run_button_state(False), self.log_area.append(f"❌ 错误: {e}")]
+        )
         self.worker.start()
 
     def auto_sync_used_keys(self, allocated_tasks):

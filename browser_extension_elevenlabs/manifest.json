@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Quick Tools ElevenLabs 批量助手",
+  "version": "0.1.0",
+  "description": "从 ElevenLabs 网页获取登录状态，本地程序通过 Native Messaging 控制扩展批量生成音频。",
+  "permissions": [
+    "scripting",
+    "storage",
+    "downloads",
+    "tabs",
+    "notifications",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "https://*.elevenlabs.io/*",
+    "https://*.elevenlabs.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Quick Tools ElevenLabs"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.elevenlabs.io/*",
+        "https://*.elevenlabs.com/*"
+      ],
+      "js": ["elevenlabs/extID.js", "elevenlabs/panel.js", "elevenlabs/content.js"],
+      "css": ["elevenlabs/panel.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["elevenlabs/injectFetch.js"],
+      "matches": [
+        "https://*.elevenlabs.io/*",
+        "https://*.elevenlabs.com/*"
+      ]
+    }
+  ]
+}
+

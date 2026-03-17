@@ -99,20 +99,39 @@ class AudioSplitter:
                     break
                 
                 search_limit = current_pos + max_duration_sec
-                search_start = max(current_pos + 5, search_limit - 10)
+                # 搜索切点的起始位置：至少已经走过 10 秒，且在末尾 10 秒内寻找静音
+                search_start = max(current_pos + 10.0, search_limit - 10.0)
                 search_end = search_limit
                 
                 best_cut = AudioSplitter.find_best_cut_point(audio, search_start, search_end)
-                if best_cut - current_pos < 5.0:
+                # 单段时长必须 >= 10 秒，否则强制退回到最大时长边界
+                if best_cut - current_pos < 10.0:
                     best_cut = search_limit
                 
                 cut_points.append(best_cut)
                 current_pos = best_cut
+
+            # 如果最后一段不足 10 秒，尝试从前一段“借”一点时间给最后一段，
+            # 同时保证：前一段 >= 10 秒，后一段在 [10, max_duration_sec] 范围内
+            if len(cut_points) >= 2:
+                last_len = cut_points[-1] - cut_points[-2]
+                if last_len < 10.0:
+                    prev_len = cut_points[-2] - cut_points[-3] if len(cut_points) >= 3 else cut_points[-2]
+                    deficit = 10.0 - last_len  # 需要补给最后一段的时长
+                    # 前一段最多能让出的时长，保证它仍然 >= 10 秒
+                    can_give_from_prev = max(0.0, prev_len - 10.0)
+                    # 为避免最后一段超过最大阈值，再限制一下上界
+                    max_extra_for_last = max_duration_sec - last_len
+                    shift = min(deficit, can_give_from_prev, max_extra_for_last)
+                    if shift > 0:
+                        cut_points[-2] -= shift
             
             for i in range(len(cut_points) - 1):
                 start_t = cut_points[i]
                 end_t = cut_points[i+1]
-                if end_t - start_t < 0.5: continue
+                # 普通段保持 >= 10 秒；若因为极端情况仍出现更短段，则跳过
+                if end_t - start_t < 10.0:
+                    continue
                 
                 chunk_name = f"{base_name}_part{i+1}.{ext}"
                 target_path = os.path.join(output_dir, chunk_name)
@@ -288,6 +307,7 @@ class MatchWorker(QThread):
 
             video_db = []
             total_vid = len(video_files)
+            skipped_duplicates = 0
             for i, v_name in enumerate(video_files):
                 if i % 5 == 0:
                      self.progress_log.emit(f"   ... 已索引 {i}/{total_vid} 个视频")
@@ -298,9 +318,38 @@ class MatchWorker(QThread):
                     if dur > 0:
                         # Extract 12 seconds instead of 7 to get more unique volume envelope
                         head_sig = AudioComparator.get_head_signature(v_path, duration=12.0)
-                        video_db.append({'name': v_name, 'path': v_path, 'duration': dur, 'head_sig': head_sig, 'matched': False})
-                except: pass
-            self.progress_log.emit(f"✅ 视频索引完成. 有效数据: {len(video_db)} 条")
+                        if head_sig is None:
+                            # 无法提取音频指纹的也算作有效条目，后续可能仍可用于时长粗匹配
+                            video_db.append({'name': v_name, 'path': v_path, 'duration': dur, 'head_sig': head_sig, 'matched': False})
+                            continue
+
+                        # 检测并忽略与已存在条目几乎完全相同的“重复视频”
+                        is_duplicate = False
+                        for existing in video_db:
+                            if existing.get('head_sig') is None:
+                                continue
+                            # 时长足够接近才认为可能是同一素材
+                            if abs(existing['duration'] - dur) > 2.0:
+                                continue
+                            try:
+                                l = min(len(existing['head_sig']), len(head_sig))
+                                if l < 40:
+                                    continue
+                                score = np.corrcoef(existing['head_sig'][:l], head_sig[:l])[0,1]
+                            except Exception:
+                                score = 0.0
+                            # 相关度非常高，视为同一素材的重复拷贝
+                            if score > 0.97:
+                                skipped_duplicates += 1
+                                is_duplicate = True
+                                break
+
+                        if not is_duplicate:
+                            video_db.append({'name': v_name, 'path': v_path, 'duration': dur, 'head_sig': head_sig, 'matched': False})
+                except:
+                    pass
+            msg_suffix = f"，其中忽略了 {skipped_duplicates} 个重复视频" if skipped_duplicates > 0 else ""
+            self.progress_log.emit(f"✅ 视频索引完成. 有效数据: {len(video_db)} 条{msg_suffix}")
 
             audio_files = [f for f in os.listdir(self.audio_dir) 
                           if f.lower().endswith(('.mp3', '.wav', '.ogg', '.flac', '.m4a'))]
@@ -385,7 +434,17 @@ class MatchWorker(QThread):
                     self.progress_log.emit(f"      ❌ 未匹配: {aud_name} ({reason})")
                     fail_list.append(aud_name)
             
-            summary = f"匹配完成！\n总音频: {total_audio}\n成功: {success_count}\n失败/静音: {len(fail_list)}"
+            unmatched_count = len(fail_list)
+            summary = (
+                "匹配完成！\n"
+                f"总音频数: {total_audio}\n"
+                f"成功匹配的音频数: {success_count}\n"
+                f"未能匹配上的音频数: {unmatched_count}\n"
+            )
+            if unmatched_count == 0:
+                summary += "\n✅ 所有音频都找到了对应的视频，声画已全部匹配成功。"
+            else:
+                summary += "❗ 有未匹配成功的音频，请查看日志中标记为“未匹配”的条目。"
             self.finished.emit(summary)
         except Exception as e:
             self.error.emit(str(e))

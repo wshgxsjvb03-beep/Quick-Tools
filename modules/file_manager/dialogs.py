@@ -5,61 +5,56 @@ from PyQt6.QtWidgets import (
 )
 from .logic import FileManager
 
+import os
+from PyQt6.QtWidgets import (
+    QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
+    QMessageBox, QDialog, QGroupBox, QTableWidget, 
+    QTableWidgetItem, QHeaderView, QApplication
+)
+from PyQt6.QtCore import Qt
+from .logic import FileManager
+
 class SmartImportDialog(QDialog):
     def __init__(self, parent=None, default_output_dir="", project_manager=None):
         super().__init__(parent)
-        self.setWindowTitle("新建项目导入")
-        self.resize(600, 500)
+        self.setWindowTitle("智能批量生成项目 (支持表格富文本复制)")
+        self.resize(800, 600)
         self.output_dir = default_output_dir
         self.project_manager = project_manager
-        self.parsed_data = None # (text1, text2, link)
+        self.parsed_data = [] # 存储字典列表
         self.init_ui()
 
     def init_ui(self):
-        # ... (UI setup mostly same, just updating label)
         layout = QVBoxLayout()
 
-        # 1. 粘贴区域
-        layout.addWidget(QLabel("1. 请粘贴您的数据 (Text1 - Tab - Text2 - Tab - Link):"))
-        self.text_area = QPlainTextEdit()
-        self.text_area.setPlaceholderText("在此处粘贴...")
-        self.text_area.textChanged.connect(self.on_text_changed)
-        layout.addWidget(self.text_area)
-
-        from PyQt6.QtWidgets import QCheckBox
+        # 1. 操作区
+        top_layout = QHBoxLayout()
+        self.btn_read_clipboard = QPushButton("📋 从剪贴板读取表格数据 (自动解析超链接)")
+        self.btn_read_clipboard.clicked.connect(self.read_from_clipboard)
+        top_layout.addWidget(self.btn_read_clipboard)
         
-        # 2. 预览与命名
-        self.preview_group = QGroupBox("2. 项目设置")
+        self.lbl_status = QLabel("等待读取剪贴板...")
+        top_layout.addWidget(self.lbl_status)
+        layout.addLayout(top_layout)
+
+        # 2. 预览区
+        self.preview_group = QGroupBox("数据预览 (请确认识别是否正确)")
         preview_layout = QVBoxLayout()
         
-        self.lbl_status = QLabel("等待粘贴...")
-        self.lbl_status.setStyleSheet("color: gray;")
-        preview_layout.addWidget(self.lbl_status)
-        
-        self.chk_clean_text = QCheckBox("启用文本自动整理 (去除空行 + 合并小于300字的行)")
-        self.chk_clean_text.setChecked(True)
-        preview_layout.addWidget(self.chk_clean_text)
-        
-        name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel("项目名称 (将作为文件夹名):"))
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("例如: date")
-        name_layout.addWidget(self.name_input)
-        name_layout.addWidget(self.name_input)
-        preview_layout.addLayout(name_layout)
-
-        self.chk_create_folder = QCheckBox("创建同名子文件夹 (勾选后会将文件归档到子目录)")
-        self.chk_create_folder.setChecked(False) # User requested no folder by default
-        preview_layout.addWidget(self.chk_create_folder)
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["拟建项目文件夹名", "中文文案摘要", "西语文案摘要", "提取下载链接数"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        preview_layout.addWidget(self.table)
         
         self.preview_group.setLayout(preview_layout)
         layout.addWidget(self.preview_group)
 
-        # 3. 按钮
+        # 3. 底部按钮
         btn_layout = QHBoxLayout()
-        self.btn_save = QPushButton("创建项目并导入")
+        self.btn_save = QPushButton("✅ 确认无误，开始批量创建与下载")
         self.btn_save.setEnabled(False)
-        self.btn_save.setDefault(True)
         self.btn_save.clicked.connect(self.run_import)
         
         btn_cancel = QPushButton("取消")
@@ -72,29 +67,52 @@ class SmartImportDialog(QDialog):
 
         self.setLayout(layout)
 
-    def on_text_changed(self):
-        text = self.text_area.toPlainText()
-        self.parsed_data = FileManager.parse_input_batch(text)
+    def read_from_clipboard(self):
+        clipboard = QApplication.clipboard()
+        mime_data = clipboard.mimeData()
+        
+        if not mime_data.hasHtml():
+            self.lbl_status.setText("❌ 剪贴板中没有找到富文本(HTML)表格数据！请直接从云端表格复制。")
+            self.lbl_status.setStyleSheet("color: red;")
+            return
+            
+        html_text = mime_data.html()
+        self.parsed_data = FileManager.parse_clipboard_html(html_text)
         
         count = len(self.parsed_data)
         if count > 0:
-            t1, t2, link = self.parsed_data[0]
-            self.lbl_status.setText(f"✅ 已识别 {count} 条数据!\n预览第一条:\n文本1: {t1[:10]}...\n链接: {link[:20]}...")
+            self.lbl_status.setText(f"✅ 成功解析 {count} 个项目！")
             self.lbl_status.setStyleSheet("color: green;")
             self.btn_save.setEnabled(True)
-            self.btn_save.setText(f"创建项目并导入 ({count} 个文件)")
+            self.update_table()
         else:
-            self.lbl_status.setText("❌ 未识别到有效数据，请检查格式。")
+            self.lbl_status.setText("❌ 未能从表格中提取到有效数据，请检查复制的内容。")
             self.lbl_status.setStyleSheet("color: red;")
             self.btn_save.setEnabled(False)
-            self.btn_save.setText("创建项目并导入")
+            self.table.setRowCount(0)
+
+    def update_table(self):
+        self.table.setRowCount(len(self.parsed_data))
+        for row, item in enumerate(self.parsed_data):
+            # 文件夹名
+            main = item.get('main_name', '')
+            sub = item.get('sub_name', '')
+            folder_name = f"{row+1:02d}_{main}-{sub}" if sub else f"{row+1:02d}_{main}"
+            
+            # 摘要
+            cn_snippet = item.get('cn_text', '').replace('\n', ' ')[:30] + "..."
+            es_snippet = item.get('es_text', '').replace('\n', ' ')[:30] + "..."
+            link_count = str(len(item.get('links', [])))
+            
+            self.table.setItem(row, 0, QTableWidgetItem(folder_name))
+            self.table.setItem(row, 1, QTableWidgetItem(cn_snippet))
+            self.table.setItem(row, 2, QTableWidgetItem(es_snippet))
+            
+            link_item = QTableWidgetItem(link_count + " 个")
+            link_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 3, link_item)
 
     def run_import(self):
-        name = self.name_input.text().strip()
-        if not name:
-            QMessageBox.warning(self, "提示", "请输入项目名称！")
-            return
-
         if not self.output_dir:
             QMessageBox.warning(self, "提示", "未设置全局输出目录！")
             return
@@ -102,76 +120,52 @@ class SmartImportDialog(QDialog):
         if not self.parsed_data:
             return
 
-        # 创建子文件夹
-        if self.chk_create_folder.isChecked():
-            project_dir = os.path.join(self.output_dir, name)
-        else:
-            project_dir = self.output_dir
+        self.btn_save.setEnabled(False)
+        self.btn_read_clipboard.setEnabled(False)
+        
+        total = len(self.parsed_data)
+        success_builds = 0
+        total_downloads = 0
+        success_downloads = 0
+        
+        for i, item in enumerate(self.parsed_data):
+            main_name = item.get('main_name', '未命名')
+            self.lbl_status.setText(f"正在处理 {i+1}/{total}: {main_name} ...")
+            QApplication.processEvents() # 防止界面假死
             
-        try:
-            os.makedirs(project_dir, exist_ok=True)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法创建/访问文件夹: {e}")
-            return
-
-        # 开始处理
-        try:
-            # 准备数据
-            final_data = self.parsed_data
-            if self.chk_clean_text.isChecked():
-                cleaned_list = []
-                for (t1, t2, url) in self.parsed_data:
-                    c1 = FileManager.clean_and_merge_text(t1)
-                    c2 = FileManager.clean_and_merge_text(t2)
-                    cleaned_list.append((c1, c2, url))
-                final_data = cleaned_list
+            # 1. 获取不冲突的基础文件名
+            base_name = FileManager.get_unique_base_name(self.output_dir, item, index=i+1)
             
-            # 1. 保存 TXT 到项目文件夹
-            txt_path = os.path.join(project_dir, f"{name}.txt")
-            saved, save_msg = FileManager.save_batch_text(final_data, txt_path)
-            
-            if not saved:
-                QMessageBox.critical(self, "错误", f"无法保存文本文件: {save_msg}")
-                return
-
-            # 2. 批量下载
-            QMessageBox.information(self, "开始下载", f"正在项目文件夹 '{name}' 中创建文件...\n即将下载 {len(final_data)} 个文件。")
-            
-            success_count = 0
-            fail_list = []
-            
-            for i, (t1, t2, url) in enumerate(final_data, 1):
-                # 如果不是 Google Drive 链接，则跳过下载，只保留文本 (文本已在上面保存)
-                # 视为成功处理
-                if 'drive.google.com' not in url.lower():
-                    success_count += 1
-                    continue
-
-                # 文件名：基础名 + 序号
-                current_base_name = f"{name}{i}"
-                full_save_path_base = os.path.join(project_dir, current_base_name)
+            # 2. 合并写入文案到单 TXT
+            ok, txt_path = FileManager.save_combined_text(self.output_dir, base_name, item)
+            if ok:
+                success_builds += 1
+                if self.project_manager:
+                     # 注册该基础文件名（无扩展名的纯项目名）
+                     self.project_manager.add_project(base_name)
                 
-                ok, msg = FileManager.download_file(url, full_save_path_base)
-                if ok:
-                    success_count += 1
-                else:
-                    fail_list.append(f"#{i}: {msg}")
-
-            # 注册项目
-            if self.project_manager:
-                self.project_manager.add_project(name)
-
-            # 3. 结果汇总
-            if len(fail_list) == 0:
-                QMessageBox.information(self, "成功", f"项目 '{name}' 创建成功！\n共处理 {success_count} 条数据。")
-                self.accept()
-            else:
-                fail_msg = "\n".join(fail_list[:5])
-                QMessageBox.warning(self, "部分完成", f"成功: {success_count}\n失败: {len(fail_list)}\n\n失败详情:\n{fail_msg}")
-                self.accept()
+                # [更新] 西语字幕自动切片逻辑：将长段落切分为 3-4 词一行的短句，存入单独文件夹
+                es_text = item.get('es_text', '')
+                if es_text:
+                    formatted_sub = FileManager.wrap_spanish_for_subtitles(es_text, words_per_line=4)
+                    FileManager.save_subtitle_file(self.output_dir, base_name, formatted_sub)
+                     
+                # 3. 下载链接到全局目录
+                links = item.get('links', [])
                 
-        except Exception as e:
-            QMessageBox.critical(self, "异常", str(e))
-                
-        except Exception as e:
-            QMessageBox.critical(self, "异常", str(e))
+                for j, url in enumerate(links):
+                    total_downloads += 1
+                    self.lbl_status.setText(f"正在处理 {i+1}/{total}: 下载附件 {j+1}/{len(links)} ...")
+                    QApplication.processEvents()
+                    
+                    # 附件跟随主文件名前缀
+                    download_base_name = os.path.join(self.output_dir, f"{base_name}_附件_{j+1}")
+                    dl_ok, _ = FileManager.download_file(url, download_base_name)
+                    if dl_ok:
+                        success_downloads += 1
+
+        self.lbl_status.setText("✅ 批量处理完成！")
+        QMessageBox.information(self, "完成", 
+            f"处理完毕！\n成功建立 {success_builds}/{total} 个项目。\n共尝试下载 {total_downloads} 个链接，成功 {success_downloads} 个。")
+            
+        self.accept()

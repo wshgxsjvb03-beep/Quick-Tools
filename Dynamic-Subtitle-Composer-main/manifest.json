@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "视频动态字幕合成",
+  "description": "简单方便的动态字幕效果视频制作工具。",
+  "version": "1.1.1",
+  "author": "Raz1ner",
+  "action": {
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "background": {
+    "service_worker": "js/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://elevenlabs.io/*"
+      ],
+      "js": [
+        "elevenlabs/extID.js"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "elevenlabs/injectFetch.js"
+      ],
+      "matches": [
+        "https://elevenlabs.io/*"
+      ]
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "https://elevenlabs.io/*"
+    ]
+  },
+  "host_permissions": [
+    "https://*.elevenlabs.io/*",
+    "https://fonts.googleapis.com/*",
+    "https://fonts.gstatic.com/*",
+    "*://*.googleapis.com/*",
+    "*://*.opal.google/*"
+  ],
+  "permissions": [
+    "offscreen",
+    "downloads",
+    "storage",
+    "declarativeNetRequest",
+    "tabs",
+    "activeTab"
+  ]
+}

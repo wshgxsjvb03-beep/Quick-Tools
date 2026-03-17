@@ -10,7 +10,7 @@ class ElevenLabsWorker(QThread):
     finished = pyqtSignal(str) # 总结报告
     error = pyqtSignal(str)
 
-    def __init__(self, texts_with_keys, output_dir, all_keys_pool=None, model_id="eleven_v3", default_voice_id="JBFqnCBsd6RMkjVDRZzb", clear_output=False, dict_id=None, auto_manage_voices=False):
+    def __init__(self, texts_with_keys, output_dir, all_keys_pool=None, model_id="eleven_v3", default_voice_id="JBFqnCBsd6RMkjVDRZzb", clear_output=False, dict_id=None, auto_manage_voices=False, browser_mode=False, bridge_server=None):
         super().__init__()
         self.texts = texts_with_keys
         self.output_dir = output_dir
@@ -20,11 +20,17 @@ class ElevenLabsWorker(QThread):
         self.dict_id = dict_id
         self.auto_manage_voices = auto_manage_voices
         self.all_keys_pool = all_keys_pool or []
+        self.browser_mode = browser_mode
+        self.bridge_server = bridge_server
+        self._browser_result = None
         
         assigned_keys = set(item.get('api_key') for item in self.texts if item.get('api_key'))
         self.spare_keys = [k for k in self.all_keys_pool if k not in assigned_keys]
 
     def _convert_and_save(self, client, api_key, item):
+        if self.browser_mode:
+            return self._convert_via_browser(item)
+        
         name = item['name']
         content = item['content']
         item_voice_id = item.get('voice_id') or self.default_voice_id
@@ -186,9 +192,71 @@ class ElevenLabsWorker(QThread):
                 
                 raise Exception(err_str)
         
-        # If loop finishes without returning
-        if last_exception:
-            raise last_exception
+    def _convert_via_browser(self, item):
+        if not self.bridge_server or not self.bridge_server.is_connected():
+            raise Exception("浏览器插件未连接，请点击插件中的“测试连接”或刷新页面。")
+
+        from PyQt6.QtCore import QEventLoop, QTimer
+        
+        name = item['name']
+        content = item['content']
+        item_voice_id = item.get('voice_id') or self.default_voice_id
+        
+        safe_name = "".join([c for c in name if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+        if not safe_name.lower().endswith(".mp3"): safe_name += ".mp3"
+        target_path = os.path.join(self.output_dir, safe_name)
+
+        self._browser_result = None
+        loop = QEventLoop()
+        
+        def on_msg(msg):
+            if msg.get("action") == "audio_generated" and msg.get("status") == "success":
+                self._browser_result = msg
+                loop.quit()
+            elif msg.get("action") == "audio_generated" and msg.get("status") == "error":
+                self._browser_result = msg
+                loop.quit()
+
+        self.bridge_server.message_received.connect(on_msg)
+        
+        # 发送指令给插件
+        cmd = {
+            "action": "generate_audio",
+            "text": content,
+            "voiceId": item_voice_id,
+            "modelId": self.model_id
+        }
+        if not self.bridge_server.send_message(cmd):
+            self.bridge_server.message_received.disconnect(on_msg)
+            raise Exception("发送指令到浏览器失败")
+
+        # 增加一个 60 秒超时
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        timer.start(60000)
+        
+        loop.exec()
+        self.bridge_server.message_received.disconnect(on_msg)
+
+        if not self._browser_result:
+            raise Exception("浏览器响应超时 (60s)")
+        
+        if self._browser_result.get("status") == "error":
+            raise Exception(f"插件报错: {self._browser_result.get('error')}")
+
+        # 保存音频
+        audio_b64 = self._browser_result.get("audio")
+        if not audio_b64:
+            raise Exception("插件未返回有效的音频数据")
+        
+        import base64
+        audio_data = base64.b64decode(audio_b64)
+        
+        with open(target_path, "wb") as f:
+            f.write(audio_data)
+        
+        return True
 
     def run(self):
         try:
@@ -211,14 +279,17 @@ class ElevenLabsWorker(QThread):
                 if i > 0: time.sleep(1.2)
                 
                 api_key = item.get('api_key')
-                if not api_key: 
-                    self.item_result.emit(i, False, "未分配 API Key")
-                    continue
+                if not self.browser_mode:
+                    if not api_key: 
+                        self.item_result.emit(i, False, "未分配 API Key")
+                        continue
+                    if api_key not in clients: clients[api_key] = ElevenLabs(api_key=api_key)
+                    client = clients[api_key]
+                else:
+                    client = None
+                    api_key = "BROWSER"
 
-                if api_key not in clients: clients[api_key] = ElevenLabs(api_key=api_key)
-                client = clients[api_key]
-
-                self.progress_log.emit(f"[{i+1}/{total}] 使用 Key {api_key[-4:]} 生成: {item['name']} ...")
+                self.progress_log.emit(f"[{i+1}/{total}] 使用 {'网页插件' if self.browser_mode else 'Key ' + api_key[-4:]} 生成: {item['name']} ...")
                 
                 try:
                     self._convert_and_save(client, api_key, item)

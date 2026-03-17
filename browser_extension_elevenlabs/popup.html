@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Quick Tools ElevenLabs</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Microsoft YaHei", sans-serif;
+        margin: 10px;
+        width: 420px;
+      }
+      h3 {
+        margin: 0 0 8px;
+        font-size: 15px;
+      }
+      .row {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 6px;
+      }
+      .row > input,
+      .row > textarea {
+        flex: 1;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 6px;
+        font-size: 12px;
+      }
+      th,
+      td {
+        border-bottom: 1px solid #eee0;
+        padding: 4px;
+      }
+      th {
+        background: #f7f3ec;
+      }
+      #log {
+        margin-top: 6px;
+        height: 80px;
+        font-size: 11px;
+        background: #111;
+        color: #ddd;
+        padding: 4px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+      }
+      button {
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Quick Tools ElevenLabs 扩展客户端</h3>
+
+    <div class="row">
+      <button id="btn-test-host">测试本地 Host 连接</button>
+    </div>
+
+    <div class="row">
+      <button id="btn-send-batch">发送示例批量任务给本地 Host</button>
+    </div>
+
+    <div id="log"></div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
+

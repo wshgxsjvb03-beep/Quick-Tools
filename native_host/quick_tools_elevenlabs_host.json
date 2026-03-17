@@ -1,0 +1,9 @@
+{
+  "name": "quick_tools_elevenlabs_host",
+  "description": "Quick Tools ElevenLabs Browser Bridge",
+  "path": "c:\\Users\\DELL\\Desktop\\python工程\\Quick Tools\\native_host\\run_host.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://YOUR_EXTENSION_ID/"
+  ]
+}

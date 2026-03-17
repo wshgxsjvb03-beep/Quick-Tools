@@ -16,7 +16,8 @@ class ConfigManager:
         "google_ai_model_id": "gemini-2.5-flash-preview-tts", # 默认模型
         "google_ai_keys": [], # [{'key': 'xxx', 'label': '备注'}]
         "voice_library": [], # [{'category': 'GroupName', 'items': [{'name': '...', 'voice_id': '...', 'desc': '...', 'image': '...'}]}],
-        "audio_tasks": [] # [{'name': '...', 'content': '...', 'voice_id': '...', 'checked': True}]
+        "audio_tasks": [], # [{'name': '...', 'content': '...', 'voice_id': '...', 'checked': True}]
+        "elevenlabs_browser_mode": False
     }
 
     def __new__(cls):
@@ -82,6 +83,13 @@ class ConfigManager:
 
     def set_elevenlabs_keys(self, keys_list):
         self._config["elevenlabs_keys"] = keys_list
+        self.save_config()
+
+    def get_elevenlabs_browser_mode(self):
+        return self._config.get("elevenlabs_browser_mode", False)
+
+    def set_elevenlabs_browser_mode(self, enabled):
+        self._config["elevenlabs_browser_mode"] = enabled
         self.save_config()
 
     def get_google_ai_keys(self):
