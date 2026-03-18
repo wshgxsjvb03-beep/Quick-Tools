@@ -9,8 +9,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('tenacity')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-# Fix for moviepy, imageio, requests, and beautifulsoup4
-for pkg in ['moviepy', 'imageio', 'requests', 'beautifulsoup4']:
+# Fix for moviepy, imageio, requests, bs4 and soupsieve
+for pkg in ['moviepy', 'imageio', 'requests', 'bs4', 'soupsieve']:
     tmp_ret = collect_all(pkg)
     datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
