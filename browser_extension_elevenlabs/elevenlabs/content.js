@@ -15,22 +15,31 @@
   // 2. 监听来自 injectFetch.js 的 window.postMessage
   window.addEventListener("message", (event) => {
     // 只处理来自本页面的消息
-    if (event.source !== window) return;
+    if (event.source !== window || !event.data) return;
 
-    if (event.data && event.data.type === "ELEVEN_VOICES_UPDATED") {
-      console.log("ElevenLabs Tool: Received voices from page, syncing to background...", event.data.voices);
-      chrome.runtime.sendMessage({ 
-        action: "update_voices", 
-        voices: event.data.voices 
-      });
-    }
+    // 检查扩展上下文是否有效
+    try {
+      if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+        return; // 上下文已失效，静默退出
+      }
 
-    if (event.data && event.data.type === "ELEVEN_TOKEN_UPDATED") {
-      console.log("ElevenLabs Tool: Received token from page, syncing to background...");
-      chrome.runtime.sendMessage({ 
-        action: "saveToken", 
-        token: event.data.token 
-      });
+      if (event.data.type === "ELEVEN_VOICES_UPDATED") {
+        console.log("ElevenLabs Tool: Syncing voices to background...");
+        chrome.runtime.sendMessage({ 
+          action: "update_voices", 
+          voices: event.data.voices 
+        }).catch(() => {}); // 捕获异步消息错误
+      }
+
+      if (event.data.type === "ELEVEN_TOKEN_UPDATED") {
+        console.log("ElevenLabs Tool: Syncing token to background...");
+        chrome.runtime.sendMessage({ 
+          action: "saveToken", 
+          token: event.data.token 
+        }).catch(() => {}); // 捕获异步消息错误
+      }
+    } catch (e) {
+      // 捕获同步调用错误 (如 Context invalidated)
     }
   });
 

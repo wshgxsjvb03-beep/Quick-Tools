@@ -6,3 +6,6 @@ numpy
 elevenlabs
 google-genai
 pyautogui
+requests
+beautifulsoup4
+tenacity

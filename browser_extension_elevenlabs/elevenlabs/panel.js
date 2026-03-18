@@ -14,10 +14,14 @@
     if (document.getElementById('qt-elevenlabs-panel')) return;
     
     // 1. 从存储恢复任务
-    const saved = await chrome.storage.local.get(['qt_batch_tasks']);
-    if (saved.qt_batch_tasks) {
-      state.tasks = saved.qt_batch_tasks;
-    }
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+        const saved = await chrome.storage.local.get(['qt_batch_tasks']);
+        if (saved && saved.qt_batch_tasks) {
+          state.tasks = saved.qt_batch_tasks;
+        }
+      }
+    } catch (e) {}
 
     injectUI();
     bindEvents();
@@ -25,7 +29,7 @@
     
     // 2. 持续监测连接状态
     checkConnection();
-    setInterval(checkConnection, 5000);
+    checkInterval = setInterval(checkConnection, 5000);
   }
 
   function injectUI() {
@@ -116,27 +120,53 @@
   }
 
   function saveState() {
-     chrome.storage.local.set({ qt_batch_tasks: state.tasks });
+     try {
+       if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local && chrome.runtime && chrome.runtime.id) {
+         chrome.storage.local.set({ qt_batch_tasks: state.tasks });
+       }
+     } catch (e) {
+       // Silent fail on invalidation
+     }
   }
 
+  let checkInterval = null;
+
   function checkConnection() {
-    chrome.runtime.sendMessage({ action: "get_status" }, (res) => {
-      if (res) {
-        state.isConnected = res.connected;
-        const indicator = document.getElementById('qt-conn-indicator');
-        const title = document.getElementById('qt-header-title');
-        
-        if (state.isConnected) {
-          indicator.style.background = '#10b981'; // 绿色
-          indicator.title = "已同步主程序：音频将保存至本地文件夹";
-          title.innerText = "🚀 批量生成 (已同步本地)";
-        } else {
-          indicator.style.background = '#fbbf24'; // 黄色
-          indicator.title = "独立模式：音频将保存至下载目录";
-          title.innerText = "🚀 批量生成 (独立软件模式)";
-        }
+    try {
+      if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+         throw new Error("dead");
       }
-    });
+
+      chrome.runtime.sendMessage({ action: "get_status" }, (res) => {
+        // 重要：这里也需要检查 lastError，否则会报 Unchecked runtime.lastError
+        if (chrome.runtime && chrome.runtime.lastError) { return; }
+        
+        if (res) {
+          state.isConnected = !!res.connected;
+          const indicator = document.getElementById('qt-conn-indicator');
+          const title = document.getElementById('qt-header-title');
+          
+          if (!indicator || !title) return;
+
+          if (state.isConnected) {
+            indicator.style.background = '#10b981';
+            indicator.title = "已同步主程序：音频将保存至本地文件夹";
+            title.innerText = "🚀 批量生成 (已同步本地)";
+          } else {
+            indicator.style.background = '#fbbf24';
+            indicator.title = "独立模式：音频将保存至下载目录";
+            title.innerText = "🚀 批量生成 (独立软件模式)";
+          }
+        }
+      });
+    } catch (e) {
+      if (checkInterval) {
+        clearInterval(checkInterval);
+        checkInterval = null;
+      }
+      // Prevent invalidation error from leaking
+      return;
+    }
   }
 
   function render() {
@@ -179,38 +209,73 @@
 
   async function startBatchOperation() {
     if (state.isProcessing) return;
+    
+    // 如果全部都是已完成任务，提示用户是否重新开始
+    const pendingTasks = state.tasks.filter(t => t.status !== 'success');
+    if (pendingTasks.length === 0 && state.tasks.length > 0) {
+      if (confirm("当前列表任务已全部完成，是否全部重置并重新开始？")) {
+        state.tasks.forEach(t => t.status = 'pending');
+        saveState();
+        render();
+      } else {
+        return;
+      }
+    }
+
     state.isProcessing = true;
     render();
 
-    for (let i = 0; i < state.tasks.length; i++) {
-      let t = state.tasks[i];
-      if (t.status === 'success') continue;
+    try {
+      for (let i = 0; i < state.tasks.length; i++) {
+        let t = state.tasks[i];
+        if (t.status === 'success') continue;
 
-      t.status = 'processing';
-      render();
+        t.status = 'processing';
+        render();
 
-      try {
-        const result = await new Promise(resolve => {
-          chrome.runtime.sendMessage({
-            action: "generate_audio_request",
-            text: t.content,
-            name: t.name,
-            voiceId: t.voice_id || state.defaultVoiceId,
-            modelId: state.defaultModelId
-          }, res => resolve(res || {status: 'error'}));
-        });
-        t.status = result.status === 'success' ? 'success' : 'error';
-        saveState();
-      } catch (e) {
-        t.status = 'error';
+        try {
+          const result = await new Promise(resolve => {
+            if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+              resolve({status: 'error', error: '插件环境已失效，请刷新网页'});
+              return;
+            }
+            chrome.runtime.sendMessage({
+              action: "generate_audio_request",
+              text: t.content,
+              name: t.name,
+              voiceId: t.voice_id || state.defaultVoiceId,
+              modelId: state.defaultModelId
+            }, res => resolve(res || {status: 'error'}));
+          });
+          
+          if (result.status === 'success') {
+            t.status = 'success';
+          } else {
+            t.status = 'error';
+            console.error("Task failed:", result.error);
+          }
+          saveState();
+        } catch (e) {
+          t.status = 'error';
+          console.error("Batch error loop:", e);
+        }
+        render();
+        // 稍微等待，防止请求过快
+        await new Promise(r => setTimeout(r, 800));
       }
+    } catch (globalError) {
+      console.error("Global batch error:", globalError);
+    } finally {
+      state.isProcessing = false;
       render();
-      await new Promise(r => setTimeout(r, 600));
+      // 最后给个总结反馈
+      const successCount = state.tasks.filter(t => t.status === 'success').length;
+      if (successCount > 0) {
+        alert(state.isConnected ? 
+          `完成！${successCount} 条音频已同步保存。` : 
+          `完成！${successCount} 条音频已保存至下载目录。`);
+      }
     }
-
-    state.isProcessing = false;
-    render();
-    alert(state.isConnected ? "所有音频已同步保存到本地程序。" : "独立模式：所有音频已保存到浏览器下载目录。");
   }
 
   function makeDraggable(el, handle) {

@@ -33,7 +33,7 @@ async function handleHostMessage(msg) {
       }
 
       const { text, voiceId, modelId, name } = msg;
-      const url = `https://elevenlabs.io/api/v1/text-to-speech/${voiceId}`;
+      const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
       
       const response = await fetch(url, {
         method: 'POST',
@@ -57,53 +57,52 @@ async function handleHostMessage(msg) {
         throw new Error(`API 返回错误 (${response.status}): ${errText}`);
       }
 
-      const audioBlob = await response.blob();
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64Audio = reader.result.split(',')[1];
-        const safeName = name || "elevenlabs_audio";
-        const filename = `elevenlabs/${safeName.endsWith('.mp3') ? safeName : safeName + '.mp3'}`;
-        
-        const result = {
-          action: "audio_generated",
-          status: "success",
-          audio: base64Audio,
-          name: safeName
-        };
+      const arrayBuffer = await response.arrayBuffer();
+      const base64Audio = btoa(
+        new Uint8Array(arrayBuffer)
+          .reduce((data, byte) => data + String.fromCharCode(byte), '')
+      );
 
-        // 优先发送到主程序保存
-        if (nativePort) {
-          nativePort.postMessage(result);
-          console.log("Audio sent to Native Host:", filename);
-        } else {
-          // 独立模式：直接通过浏览器下载
-          const dataUrl = 'data:audio/mpeg;base64,' + base64Audio;
-          chrome.downloads.download({
-            url: dataUrl,
-            filename: filename,
-            saveAs: false
-          }, (downloadId) => {
-            if (chrome.runtime.lastError) {
-               console.error("Download failed:", chrome.runtime.lastError);
-            } else {
-               console.log("Download started, ID:", downloadId);
-               // 发送状态给面板或弹出通知
-               chrome.notifications.create({
-                 type: 'basic',
-                 title: 'ElevenLabs 批量助手',
-                 message: `音频已开始下载: ${safeName}`,
-                 iconUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==' // 用一个透明像素占位
-               });
-            }
-          });
-          console.log("Audio saved via Browser Downloads (Standalone Mode).");
-        }
-        
-        if (msg.sendResponse) {
-          msg.sendResponse(result);
-        }
+      const safeName = name || "elevenlabs_audio";
+      const filename = `elevenlabs/${safeName.endsWith('.mp3') ? safeName : safeName + '.mp3'}`;
+      
+      const result = {
+        action: "audio_generated",
+        status: "success",
+        audio: base64Audio,
+        name: safeName
       };
-      reader.readAsDataURL(audioBlob);
+
+      // 优先发送到主程序保存
+      if (nativePort) {
+        nativePort.postMessage(result);
+        console.log("Audio sent to Native Host:", filename);
+      } else {
+        // 独立模式：直接通过浏览器下载
+        const dataUrl = 'data:audio/mpeg;base64,' + base64Audio;
+        chrome.downloads.download({
+          url: dataUrl,
+          filename: filename,
+          saveAs: false
+        }, (downloadId) => {
+          if (chrome.runtime.lastError) {
+             console.error("Download failed:", chrome.runtime.lastError);
+          } else {
+             console.log("Download started, ID:", downloadId);
+             chrome.notifications.create({
+               type: 'basic',
+               title: 'ElevenLabs 批量助手',
+               message: `音频已开始下载: ${safeName}`,
+               iconUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=='
+             });
+          }
+        });
+        console.log("Audio saved via Browser Downloads (Standalone Mode).");
+      }
+      
+      if (msg.sendResponse) {
+        msg.sendResponse(result);
+      }
 
     } catch (error) {
       console.error("Generation failed:", error);

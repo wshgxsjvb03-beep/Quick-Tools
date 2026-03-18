@@ -13,7 +13,7 @@ if current_dir not in sys.path:
 
 from modules.config_manager import ConfigManager
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 class DesktopApp(QMainWindow):
     def __init__(self):
