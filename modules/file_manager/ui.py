@@ -5,13 +5,15 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
     QMessageBox, QLineEdit, QSplitter, QListWidget, QListWidgetItem,
     QListView, QAbstractItemView, QFileDialog, QFrame, QStyle, QSizePolicy,
-    QApplication, QMenu, QInputDialog
+    QApplication, QMenu, QInputDialog, QDoubleSpinBox
 )
 from PyQt6.QtCore import Qt, QDir, QSize
 from PyQt6.QtGui import QAction, QFileSystemModel, QColor, QPalette, QIcon, QPixmap, QPainter
 from modules.config_manager import ConfigManager
 from .dialogs import SmartImportDialog
 from .data import ProjectManager
+from modules.audio_manager.dialogs import SmartSplitConfigDialog
+from modules.audio_manager.services.processor import SmartBatchSplitWorker
 
 # 紧凑样式表，加入圆点支持 + 暖米色卡片风格
 STYLESHEET = """
@@ -178,7 +180,12 @@ class FileManagerUI(QWidget):
         self.config = ConfigManager()
         self.current_root = self.config.get_global_output_dir()
         self.project_manager = ProjectManager(self.current_root)
+        self.unpack_widget = None # 共享的解包组件实例
         self.init_ui()
+
+    def set_unpack_widget(self, widget):
+        """接收来自视频工具页的解包组件实例，实现参数同步"""
+        self.unpack_widget = widget
 
     def init_ui(self):
         self.main_layout = QVBoxLayout(self)
@@ -205,6 +212,26 @@ class FileManagerUI(QWidget):
         tool_row.addWidget(self.path_label)
         
         tool_row.addStretch()
+        
+        self.btn_refresh = QPushButton("🔄 刷新 (Refresh)")
+        self.btn_refresh.setFixedHeight(30)
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.clicked.connect(self.manual_refresh)
+        tool_row.addWidget(self.btn_refresh)
+
+        self.btn_unpack_video = QPushButton("📦 视频一键解包")
+        self.btn_unpack_video.setFixedHeight(30)
+        self.btn_unpack_video.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_unpack_video.setStyleSheet("background-color: #E6F7FF; border: 1px solid #91D5FF; color: #0050B3;")
+        self.btn_unpack_video.clicked.connect(self.run_unpack_video)
+        tool_row.addWidget(self.btn_unpack_video)
+        
+        self.btn_smart_split = QPushButton("⚒️ 智能批量切割")
+        self.btn_smart_split.setFixedHeight(30)
+        self.btn_smart_split.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_smart_split.setStyleSheet("background-color: #FDF6E9; border: 1px solid #DDCFBC; color: #8A5B2E;")
+        self.btn_smart_split.clicked.connect(self.run_smart_split)
+        tool_row.addWidget(self.btn_smart_split)
         
         btn_import = QPushButton("➕ 新建导入 (Import)")
         btn_import.setObjectName("btn_primary")
@@ -262,6 +289,38 @@ class FileManagerUI(QWidget):
         r_toolbar.addWidget(self.btn_open_folder)
         right_vbox.addLayout(r_toolbar)
         
+        # === 资源变速组件 ===
+        self.speed_toolbar = QFrame()
+        self.speed_toolbar.setObjectName("section_header")
+        self.speed_toolbar.setVisible(False)
+        speed_layout = QHBoxLayout(self.speed_toolbar)
+        speed_layout.setContentsMargins(10, 5, 10, 5)
+        
+        self.lbl_speed_file = QLabel("准备调速:")
+        speed_layout.addWidget(self.lbl_speed_file)
+        
+        speed_layout.addWidget(QLabel(" 播放倍速:"))
+        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setRange(0.5, 2.0)
+        self.speed_spin.setSingleStep(0.1)
+        self.speed_spin.setValue(1.0)
+        speed_layout.addWidget(self.speed_spin)
+        
+        self.btn_preview_speed = QPushButton("▶ 试听前10秒")
+        self.btn_preview_speed.setObjectName("btn_primary")
+        self.btn_preview_speed.clicked.connect(self.preview_speed)
+        speed_layout.addWidget(self.btn_preview_speed)
+        
+        self.btn_apply_speed = QPushButton("✅ 应用并替换")
+        self.btn_apply_speed.setObjectName("btn_primary")
+        self.btn_apply_speed.setStyleSheet("background-color: #52C41A; color: white;") 
+        self.btn_apply_speed.clicked.connect(self.apply_speed)
+        speed_layout.addWidget(self.btn_apply_speed)
+        
+        speed_layout.addStretch()
+        right_vbox.addWidget(self.speed_toolbar)
+        # ====================
+        
         self.file_model = QFileSystemModel()
         self.file_list = QListView()
         self.file_list.setModel(self.file_model)
@@ -269,6 +328,7 @@ class FileManagerUI(QWidget):
         self.file_list.setUniformItemSizes(True)
         self.file_list.setIconSize(QSize(24, 24))
         self.file_list.doubleClicked.connect(self.on_file_double_click)
+        self.file_list.selectionModel().selectionChanged.connect(self.on_file_selection_changed)
         right_vbox.addWidget(self.file_list)
         
         self.splitter.addWidget(left_container)
@@ -315,6 +375,24 @@ class FileManagerUI(QWidget):
             item = QListWidgetItem(name)
             item.setIcon(create_dot_icon(status_color))
             self.project_list.addItem(item)
+
+    def manual_refresh(self):
+        """手动刷新项目列表和状态"""
+        selected_name = None
+        current_item = self.project_list.currentItem()
+        if current_item:
+            selected_name = current_item.text()
+            
+        if self.project_manager:
+            self.project_manager.reload()
+        
+        self.refresh_projects()
+        
+        if selected_name:
+            items = self.project_list.findItems(selected_name, Qt.MatchFlag.MatchExactly)
+            if items:
+                self.project_list.setCurrentItem(items[0])
+                self.on_project_selected(items[0])
 
     def on_project_selected(self, item):
         name = item.text()
@@ -401,3 +479,126 @@ class FileManagerUI(QWidget):
         dialog = SmartImportDialog(self, self.current_root, self.project_manager)
         if dialog.exec():
             self.refresh_projects()
+
+    def on_file_selection_changed(self, selected, deselected):
+        indexes = self.file_list.selectionModel().selectedIndexes()
+        if not indexes:
+            self.speed_toolbar.setVisible(False)
+            return
+        
+        path = self.file_model.filePath(indexes[0])
+        if os.path.isfile(path):
+            ext = os.path.splitext(path)[1].lower()
+            if ext in ['.mp3', '.wav', '.m4a', '.mp4', '.mov', '.avi']:
+                self.speed_toolbar.setVisible(True)
+                name = os.path.basename(path)
+                if len(name) > 20: name = name[:17] + "..."
+                self.lbl_speed_file.setText(f"调速: {name}")
+                self.current_speed_file = path
+            else:
+                self.speed_toolbar.setVisible(False)
+                self.current_speed_file = None
+        else:
+            self.speed_toolbar.setVisible(False)
+            self.current_speed_file = None
+
+    def preview_speed(self):
+        if not hasattr(self, 'current_speed_file') or not self.current_speed_file: return
+        speed = self.speed_spin.value()
+        ext = os.path.splitext(self.current_speed_file)[1].lower()
+        is_video = ext in ['.mp4', '.mov', '.avi', '.mkv', '.flv']
+        
+        import tempfile, subprocess
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except:
+            ffmpeg_exe = "ffmpeg"
+            
+        fd, temp_path = tempfile.mkstemp(suffix=ext)
+        os.close(fd)
+        
+        cmd = [ffmpeg_exe, "-y", "-i", self.current_speed_file, "-t", "10"]
+        if is_video:
+            cmd.extend(["-filter:v", f"setpts={1/speed}*PTS", "-filter:a", f"atempo={speed}"])
+        else:
+            cmd.extend(["-filter:a", f"atempo={speed}"])
+        cmd.append(temp_path)
+        
+        creation_flags = 0
+        if os.name == 'nt': creation_flags = subprocess.CREATE_NO_WINDOW
+        
+        self.btn_preview_speed.setText("生成中...")
+        self.btn_preview_speed.setEnabled(False)
+        QApplication.processEvents()
+        
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
+            if os.path.exists(temp_path):
+                os.startfile(temp_path)
+        except Exception as e:
+            QMessageBox.critical(self, "预览错误", str(e))
+        finally:
+            self.btn_preview_speed.setText("▶ 试听前10秒")
+            self.btn_preview_speed.setEnabled(True)
+
+    def apply_speed(self):
+        if not hasattr(self, 'current_speed_file') or not self.current_speed_file: return
+        speed = self.speed_spin.value()
+        
+        reply = QMessageBox.question(self, "确认", f"确定要以 {speed}x 的速度就地替换原文件吗？此操作不可逆！")
+        if reply != QMessageBox.StandardButton.Yes: return
+        
+        from .logic import SpeedWorker
+        self.btn_apply_speed.setEnabled(False)
+        self.btn_apply_speed.setText("处理中...")
+        
+        self.speed_worker = SpeedWorker(self.current_speed_file, speed)
+        self.speed_worker.finished.connect(self.on_speed_finished)
+        self.speed_worker.start()
+        
+    def on_speed_finished(self, success, msg):
+        self.btn_apply_speed.setEnabled(True)
+        self.btn_apply_speed.setText("✅ 应用并替换")
+        if success:
+            QMessageBox.information(self, "成功", "文件已成功变速并截断原文件！")
+            # Refresh directory if needed, though file name is the same
+        else:
+            QMessageBox.critical(self, "错误", msg)
+
+    def run_smart_split(self):
+        if not self.current_root:
+            QMessageBox.warning(self, "提示", "请先配置存储路径！")
+            return
+            
+        dialog = SmartSplitConfigDialog(self)
+        if dialog.exec():
+            target = dialog.get_target_count()
+            min_duration = dialog.get_min_duration() # Retrieve min_duration
+            self.btn_smart_split.setEnabled(False)
+            self.btn_smart_split.setText("⏳ 切割中...")
+            
+            self.split_worker = SmartBatchSplitWorker(self.current_root, target, min_duration=min_duration) # Pass min_duration
+            self.split_worker.finished.connect(self.on_split_finished)
+            self.split_worker.error.connect(self.on_split_error)
+            self.split_worker.start()
+            
+    def on_split_finished(self, msg):
+        self.btn_smart_split.setEnabled(True)
+        self.btn_smart_split.setText("⚒️ 智能批量切割")
+        QMessageBox.information(self, "任务完成", msg)
+        self.manual_refresh()
+        
+    def on_split_error(self, err):
+        self.btn_smart_split.setEnabled(True)
+        self.btn_smart_split.setText("⚒️ 智能批量切割")
+        QMessageBox.critical(self, "发生错误", err)
+
+    def run_unpack_video(self):
+        """同步调用视频解理页的解包功能"""
+        if not self.unpack_widget:
+            QMessageBox.warning(self, "提示", "解包模块尚未就绪，请先点击一次“视频工具”标签页激活。")
+            return
+            
+        # 直接触发解包逻辑 (参数会自动同步，因为使用的是同一个实例)
+        self.unpack_widget.run_unpack()

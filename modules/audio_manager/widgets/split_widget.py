@@ -2,7 +2,7 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
     QFileDialog, QSpinBox, QGroupBox, QTextEdit, QMessageBox,
-    QListWidget, QAbstractItemView, QLineEdit
+    QListWidget, QAbstractItemView, QLineEdit, QComboBox
 )
 from ..services import SplitWorker
 
@@ -57,13 +57,36 @@ class AudioSplitWidget(QWidget):
 
         settings_group = QGroupBox("2. 分割设置")
         settings_layout = QVBoxLayout()
-        len_layout = QHBoxLayout()
-        len_layout.addWidget(QLabel("单个片段最大时长 (秒):"))
+        
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("切割模式:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["固定时长切割", "目标倍数切割"])
+        self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.mode_combo)
+        settings_layout.addLayout(mode_layout)
+
+        self.len_layout = QHBoxLayout()
+        self.len_layout.addWidget(QLabel("限制时长 (秒):"))
         self.length_spin = QSpinBox()
         self.length_spin.setRange(5, 300)
         self.length_spin.setValue(29)
-        len_layout.addWidget(self.length_spin)
-        settings_layout.addLayout(len_layout)
+        self.len_layout.addWidget(self.length_spin)
+        settings_layout.addLayout(self.len_layout)
+
+        self.mul_layout = QHBoxLayout()
+        self.mul_layout.addWidget(QLabel("目标倍数:"))
+        self.multiple_spin = QSpinBox()
+        self.multiple_spin.setRange(1, 100)
+        self.multiple_spin.setValue(3)
+        self.mul_layout.addWidget(self.multiple_spin)
+        self.mul_layout.addWidget(QLabel("段 (按此倍数等分, 且不超过限制时长)"))
+        settings_layout.addLayout(self.mul_layout)
+
+        for i in range(self.mul_layout.count()):
+            widget = self.mul_layout.itemAt(i).widget()
+            if widget: widget.setVisible(False)
+
         out_layout = QHBoxLayout()
         out_layout.addWidget(QLabel("输出目录:"))
         self.out_edit = QLineEdit()
@@ -101,6 +124,12 @@ class AudioSplitWidget(QWidget):
             items = [self.file_list.item(i).text() for i in range(self.file_list.count())]
             if f not in items: self.file_list.addItem(f)
 
+    def on_mode_changed(self, index):
+        is_multiple = (index == 1)
+        for i in range(self.mul_layout.count()):
+            widget = self.mul_layout.itemAt(i).widget()
+            if widget: widget.setVisible(is_multiple)
+
     def select_output_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if d: self.out_edit.setText(d)
@@ -113,9 +142,12 @@ class AudioSplitWidget(QWidget):
         file_paths = [self.file_list.item(i).text() for i in range(count)]
         sec_length = self.length_spin.value()
         output_dir = self.out_edit.text().strip() or None
+        mode = "multiple" if self.mode_combo.currentIndex() == 1 else "fixed"
+        multiple_val = self.multiple_spin.value()
+
         self.log_area.clear()
         self.split_btn.setEnabled(False)
-        self.worker = SplitWorker(file_paths, sec_length, output_dir)
+        self.worker = SplitWorker(file_paths, sec_length, output_dir, mode=mode, multiple_val=multiple_val)
         self.worker.progress_log.connect(self.log_area.append)
         self.worker.finished.connect(lambda: [self.split_btn.setEnabled(True), QMessageBox.information(self, "完成", "任务已完成！")])
         self.worker.error.connect(lambda e: [self.split_btn.setEnabled(True), self.log_area.append(f"❌ 错误: {e}")])

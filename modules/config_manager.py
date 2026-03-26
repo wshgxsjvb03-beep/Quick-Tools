@@ -17,7 +17,8 @@ class ConfigManager:
         "google_ai_keys": [], # [{'key': 'xxx', 'label': '备注'}]
         "voice_library": [], # [{'category': 'GroupName', 'items': [{'name': '...', 'voice_id': '...', 'desc': '...', 'image': '...'}]}],
         "audio_tasks": [], # [{'name': '...', 'content': '...', 'voice_id': '...', 'checked': True}]
-        "elevenlabs_browser_mode": False
+        "elevenlabs_browser_mode": False,
+        "bearer_tokens": [] # [{'token': 'xxx', 'added_at': 1234567890.0, 'label': '备注'}]
     }
 
     def __new__(cls):
@@ -115,6 +116,8 @@ class ConfigManager:
             return tasks
         elif provider == "Google AI (Gemini)" or provider == "Google AI":
             return self._config.get("google_ai_tasks", [])
+        elif provider == "BearerToken":
+            return self._config.get("bearer_token_tasks", [])
         return []
 
     def set_audio_tasks(self, tasks_list, provider="ElevenLabs"):
@@ -124,5 +127,16 @@ class ConfigManager:
             self._config["audio_tasks"] = tasks_list
         elif provider == "Google AI (Gemini)" or provider == "Google AI":
             self._config["google_ai_tasks"] = tasks_list
+        elif provider == "BearerToken":
+            self._config["bearer_token_tasks"] = tasks_list
+        self.save_config()
+
+    def get_bearer_tokens(self):
+        """返回已保存的 Bearer Token 列表 [{'token': ..., 'added_at': float, 'label': ...}]"""
+        return self._config.get("bearer_tokens", [])
+
+    def set_bearer_tokens(self, tokens_list):
+        """持久化保存 Bearer Token 列表"""
+        self._config["bearer_tokens"] = tokens_list
         self.save_config()
 

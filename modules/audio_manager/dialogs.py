@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QMessageBox, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QFileDialog, QTreeWidget, QTreeWidgetItem
+    QFileDialog, QTreeWidget, QTreeWidgetItem, QSpinBox
 )
 from PyQt6.QtGui import QPixmap, QIcon
 from PyQt6.QtCore import Qt, QSize
@@ -1143,3 +1143,69 @@ class GoogleAIKeyManagerDialog(QDialog):
 
     def get_data(self):
         return self.results
+class SmartSplitConfigDialog(QDialog):
+    """
+    智能批量切割配置对话框
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("智能批量切割配置")
+        self.setMinimumWidth(350)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        info = QLabel("⚙️ <b>切割模式说明:</b><br>"
+                      "1. 优先切割 58s 的片段，直到满足目标数量。<br>"
+                      "2. 达标后，剩余音频将自动按 28s 片段切割。<br>"
+                      "3. 遍历当前存储路径下的所有项目。")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #5C4A32; background-color: #FFF9EB; padding: 10px; border-radius: 8px;")
+        layout.addWidget(info)
+
+        input_layout = QHBoxLayout()
+        input_layout.addWidget(QLabel("🎯 58s 片段目标总数:"))
+        self.target_spin = QSpinBox()
+        self.target_spin.setRange(1, 9999)
+        self.target_spin.setValue(50)
+        self.target_spin.setFixedHeight(30)
+        input_layout.addWidget(self.target_spin)
+        layout.addLayout(input_layout)
+
+        min_dur_layout = QHBoxLayout()
+        min_dur_layout.addWidget(QLabel("📏 片段最小值 (秒):"))
+        self.min_dur_spin = QSpinBox()
+        self.min_dur_spin.setRange(1, 30)
+        self.min_dur_spin.setValue(10)
+        self.min_dur_spin.setFixedHeight(30)
+        min_dur_layout.addWidget(self.min_dur_spin)
+        min_dur_layout.addWidget(QLabel("(不足此长度将自动合并)"))
+        layout.addLayout(min_dur_layout)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setMinimumHeight(35)
+        cancel_btn.clicked.connect(self.reject)
+        
+        ok_btn = QPushButton("🚀 开始批量切割")
+        ok_btn.setObjectName("btn_primary")
+        ok_btn.setMinimumHeight(35)
+        ok_btn.setStyleSheet("background-color: #F1A94A; color: #4A310F; font-weight: bold; border-radius: 17px; padding: 0 20px;")
+        ok_btn.clicked.connect(self.accept)
+        
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+
+    def get_target_count(self):
+        return self.target_spin.value()
+
+    def get_min_duration(self):
+        return self.min_dur_spin.value()

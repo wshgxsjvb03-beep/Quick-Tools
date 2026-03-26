@@ -448,6 +448,238 @@ class DeleteVoiceWorker(QThread):
         except Exception as e:
             self.finished.emit(False, str(e))
 
+class BearerQueryWorker(QThread):
+    """查询单个 Bearer Token 的积分余量，与 KeyInfoWorker 类似但用 requests 库"""
+    info_received = pyqtSignal(str, dict)  # token, info_dict
+    error = pyqtSignal(str, str)           # token, error_msg
+
+    def __init__(self, token: str):
+        super().__init__()
+        self.token = token
+
+    def run(self):
+        import requests
+        try:
+            resp = requests.get(
+                "https://api.us.elevenlabs.io/v1/user/subscription",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=15
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                character_count = data.get("character_count", 0)
+                character_limit = data.get("character_limit", 0)
+                info = {
+                    "character_count": character_count,
+                    "character_limit": character_limit,
+                    "remaining": character_limit - character_count,
+                    "status": data.get("status", "unknown"),
+                }
+                self.info_received.emit(self.token, info)
+            elif resp.status_code == 401:
+                self.error.emit(self.token, "Token 已过期或无效 (401)")
+            elif resp.status_code == 403:
+                self.error.emit(self.token, "账号受限/风控 (403)")
+            else:
+                self.error.emit(self.token, f"HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            self.error.emit(self.token, f"{type(e).__name__}: {str(e)}")
+
+
+class BearerTokenWorker(QThread):
+    """使用 Bearer Token（网页会话令牌）批量生成音频，支持多 Token 轮询"""
+    progress_log  = pyqtSignal(str)
+    item_finished = pyqtSignal(int)             # row index，成功后 UI 取消勾选
+    item_result   = pyqtSignal(int, bool, str)  # index, success, error_msg
+    finished      = pyqtSignal(str)             # 汇总报告
+    fatal_error   = pyqtSignal(str)             # IP封锁/风控/全部耗尽 → 全部停止
+
+    QUOTA_KEYWORDS = ["quota_exceeded", "insufficient_credits", "out_of_credits",
+                      "character_limit", "payment_required"]
+    FATAL_KEYWORDS = ["detected_unusual_activity", "unusual_activity",
+                      "Too Many Requests", "rate_limit_exceeded", "access_denied"]
+
+    def __init__(self, tokens: list, tasks: list, output_dir: str,
+                 model_id: str = "eleven_v3",
+                 default_voice_id: str = "JBFqnCBsd6RMkjVDRZzb",
+                 clear_output: bool = False):
+        super().__init__()
+        self.tokens = tokens
+        self.tasks = tasks
+        self.output_dir = output_dir
+        self.model_id = model_id
+        self.default_voice_id = default_voice_id
+        self.clear_output = clear_output
+        self._token_index = 0
+
+    def _get_next_token(self):
+        tok = self.tokens[self._token_index % len(self.tokens)]
+        self._token_index = (self._token_index + 1) % len(self.tokens)
+        return tok
+
+    def _do_request(self, token: str, voice_id: str, content: str, name: str):
+        """
+        发出一次 TTS 请求并保存文件。
+        返回 (success, need_switch_token, error_msg)
+        """
+        import requests, uuid
+        url = f"https://api.us.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        }
+        payload = {
+            "text": content,
+            "model_id": self.model_id,
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=60, stream=True)
+        except Exception as e:
+            return False, False, f"网络异常: {type(e).__name__}: {str(e)}"
+
+        if resp.status_code == 200:
+            safe_name = "".join([c for c in name if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+            if not safe_name.lower().endswith(".mp3"):
+                safe_name += ".mp3"
+            target_path = os.path.join(self.output_dir, safe_name)
+            temp_path = os.path.join(self.output_dir, f"gen_{uuid.uuid4().hex}.mp3")
+            try:
+                with open(temp_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if self.isInterruptionRequested():
+                            raise InterruptedError("User stop")
+                        if chunk:
+                            f.write(chunk)
+                if os.path.exists(target_path):
+                    try: os.remove(target_path)
+                    except: pass
+                os.rename(temp_path, target_path)
+                return True, False, ""
+            except InterruptedError:
+                try: os.remove(temp_path)
+                except: pass
+                raise
+            except Exception as e:
+                try: os.remove(temp_path)
+                except: pass
+                return False, False, f"文件写入失败: {str(e)}"
+
+        try:
+            err_text = str(resp.json())
+        except Exception:
+            err_text = resp.text[:300]
+
+        if resp.status_code == 402 or any(kw in err_text for kw in self.QUOTA_KEYWORDS):
+            return False, True, f"积分不足 (HTTP {resp.status_code})"
+
+        if resp.status_code == 403 or any(kw in err_text for kw in self.FATAL_KEYWORDS):
+            raise RuntimeError(f"账号风控/IP封锁 (HTTP {resp.status_code}): {err_text[:200]}")
+
+        if resp.status_code == 401:
+            raise RuntimeError(f"Token 已过期或无效 (HTTP 401)，请重新从浏览器截取 Token。")
+
+        return False, False, f"HTTP {resp.status_code}: {err_text[:200]}"
+
+    def run(self):
+        try:
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+            elif self.clear_output:
+                for f in os.listdir(self.output_dir):
+                    try: os.remove(os.path.join(self.output_dir, f))
+                    except: pass
+
+            total = len(self.tasks)
+            success_count = 0
+            fail_count = 0
+
+            for i, item in enumerate(self.tasks):
+                if self.isInterruptionRequested():
+                    break
+
+                if i > 0:
+                    time.sleep(1.0)
+
+                name = item.get("name", f"task_{i+1}")
+                content = item.get("content", "")
+                voice_id = item.get("voice_id", "") or self.default_voice_id
+
+                # 优先使用调度时分配好的 token（如果有），否则从轮询中取
+                assigned_token = item.get("token")
+                current_token = assigned_token if assigned_token else self._get_next_token()
+
+                self.progress_log.emit(
+                    f"[{i+1}/{total}] 🎯 Token ...{current_token[-8:]} → 生成: {name}"
+                )
+
+                tried_tokens = set()
+                task_success = False
+                task_error = ""
+
+                while True:
+                    if self.isInterruptionRequested():
+                        break
+                    tried_tokens.add(current_token)
+
+                    try:
+                        ok, need_switch, err = self._do_request(current_token, voice_id, content, name)
+                    except InterruptedError:
+                        raise
+                    except RuntimeError as fatal:
+                        self.progress_log.emit(f"   🚨 致命错误: {str(fatal)}")
+                        self.item_result.emit(i, False, str(fatal))
+                        self.fatal_error.emit(str(fatal))
+                        return
+
+                    if ok:
+                        task_success = True
+                        break
+
+                    if need_switch:
+                        self.progress_log.emit(
+                            f"   ⚠️ Token ...{current_token[-8:]} 积分不足，切换下一个..."
+                        )
+                        next_tok = None
+                        for tok in self.tokens:
+                            if tok not in tried_tokens:
+                                next_tok = tok
+                                break
+                        if next_tok is None:
+                            self.progress_log.emit("   ❌ 所有 Token 积分均已耗尽，停止任务。")
+                            self.item_result.emit(i, False, "所有 Token 积分均已耗尽")
+                            self.fatal_error.emit(
+                                "所有 Bearer Token 的积分均已耗尽，请补充新 Token 或等待积分重置。"
+                            )
+                            return
+                        current_token = next_tok
+                        self.progress_log.emit(f"   ↪️ 切换至 Token ...{current_token[-8:]}")
+                    else:
+                        task_error = err
+                        self.progress_log.emit(f"   ❌ 失败: {err}")
+                        break
+
+                if task_success:
+                    success_count += 1
+                    self.progress_log.emit("   ✅ 完成")
+                    self.item_finished.emit(i)
+                    self.item_result.emit(i, True, "")
+                    self._token_index = (self._token_index + 1) % len(self.tokens)
+                else:
+                    fail_count += 1
+                    self.item_result.emit(i, False, task_error or "未知错误")
+
+            self.finished.emit(
+                f"批量生成完成！\n✅ 成功: {success_count} / {total}\n❌ 失败: {fail_count} / {total}"
+            )
+
+        except InterruptedError:
+            self.finished.emit("⏹ 任务已被用户停止。")
+        except Exception as e:
+            self.fatal_error.emit(f"运行时异常: {str(e)}")
+
+
 class ClearVoicesWorker(QThread):
     """清空指定 API Key 下的所有自定义声线"""
     progress = pyqtSignal(str)  # 进度消息

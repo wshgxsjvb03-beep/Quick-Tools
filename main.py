@@ -101,6 +101,8 @@ class DesktopApp(QMainWindow):
         # 文件管理页
         from modules.file_manager import FileManagerUI
         self.tab_file = FileManagerUI()
+        if hasattr(self, 'tab_video') and hasattr(self.tab_video, 'unpack_widget'):
+            self.tab_file.set_unpack_widget(self.tab_video.unpack_widget)
         self.tabs.addTab(self.tab_file, "📂 文件管理")
         
         # HeyGen 自动 (新模块)

@@ -74,16 +74,15 @@ class AudioSplitter:
             return timestamps[np.argmin(volumes)]
 
     @staticmethod
-    def split_audio(file_path, max_duration_sec=29.0, output_dir=None):
+    def split_audio(file_path, max_duration_sec=29.0, output_dir=None, mode="fixed", 
+                    multiple_val=1, target_long_count=None, short_duration_sec=28.0,
+                    min_duration_sec=5.0):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"文件未找到: {file_path}")
             
         if output_dir is None:
             output_dir = os.path.dirname(file_path)
 
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        ext = os.path.splitext(file_path)[1].replace('.', '')
-        
         audio = None
         try:
             audio = AudioFileClip(file_path)
@@ -92,46 +91,65 @@ class AudioSplitter:
             
             cut_points = [0.0]
             current_pos = 0.0
+            long_count_generated = 0
             
             while current_pos < total_duration:
-                if total_duration - current_pos <= max_duration_sec:
+                remaining = total_duration - current_pos
+                # 决定当前段的时长
+                if target_long_count is not None and long_count_generated < target_long_count:
+                    if remaining >= max_duration_sec:
+                        current_target_dur = max_duration_sec
+                        is_long = True
+                    else:
+                        current_target_dur = short_duration_sec
+                        is_long = False
+                else:
+                    current_target_dur = short_duration_sec
+                    is_long = False
+                
+                # 开始切分
+                if remaining <= current_target_dur:
                     cut_points.append(total_duration)
+                    if is_long and remaining >= (current_target_dur - 1.5):
+                        long_count_generated += 1
                     break
                 
-                search_limit = current_pos + max_duration_sec
-                # 搜索切点的起始位置：至少已经走过 10 秒，且在末尾 10 秒内寻找静音
-                search_start = max(current_pos + 10.0, search_limit - 10.0)
+                search_limit = current_pos + current_target_dur
+                min_search_seg = min(10.0, current_target_dur * 0.5)
+                search_start = max(current_pos + min_search_seg, search_limit - min_search_seg)
                 search_end = search_limit
                 
                 best_cut = AudioSplitter.find_best_cut_point(audio, search_start, search_end)
-                # 单段时长必须 >= 10 秒，否则强制退回到最大时长边界
-                if best_cut - current_pos < 10.0:
+                if best_cut - current_pos < min_search_seg:
                     best_cut = search_limit
                 
                 cut_points.append(best_cut)
                 current_pos = best_cut
+                if is_long: long_count_generated += 1
 
-            # 如果最后一段不足 10 秒，尝试从前一段“借”一点时间给最后一段，
-            # 同时保证：前一段 >= 10 秒，后一段在 [10, max_duration_sec] 范围内
-            if len(cut_points) >= 2:
-                last_len = cut_points[-1] - cut_points[-2]
-                if last_len < 10.0:
-                    prev_len = cut_points[-2] - cut_points[-3] if len(cut_points) >= 3 else cut_points[-2]
-                    deficit = 10.0 - last_len  # 需要补给最后一段的时长
-                    # 前一段最多能让出的时长，保证它仍然 >= 10 秒
-                    can_give_from_prev = max(0.0, prev_len - 10.0)
-                    # 为避免最后一段超过最大阈值，再限制一下上界
-                    max_extra_for_last = max_duration_sec - last_len
-                    shift = min(deficit, can_give_from_prev, max_extra_for_last)
-                    if shift > 0:
-                        cut_points[-2] -= shift
-            
+            # --- 优化：片段最小值重分配 (借时间) ---
+            if len(cut_points) >= 3:
+                last_dur = cut_points[-1] - cut_points[-2]
+                if last_dur < min_duration_sec:
+                    # 不直接合并，而是向上个片段“要”几秒钟，凑够最小值
+                    new_pt = cut_points[-1] - min_duration_sec
+                    # 确保重分配后，倒数第二个片段仍有意义 (> 5s 或 > min_duration/2)
+                    if new_pt > cut_points[-3] + 5.0:
+                        cut_points[-2] = new_pt
+                    else:
+                        # 如果上个片段太短给不起时间，则回退到合并模式
+                        cut_points.pop(-2)
+            elif len(cut_points) == 2:
+                # 只有一个片段，即使短也没法借，只能保留
+                pass
+
+            # 写入文件
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            ext = os.path.splitext(file_path)[1].replace('.', '')
             for i in range(len(cut_points) - 1):
                 start_t = cut_points[i]
                 end_t = cut_points[i+1]
-                # 普通段保持 >= 10 秒；若因为极端情况仍出现更短段，则跳过
-                if end_t - start_t < 10.0:
-                    continue
+                if end_t - start_t < 0.5: continue
                 
                 chunk_name = f"{base_name}_part{i+1}.{ext}"
                 target_path = os.path.join(output_dir, chunk_name)
@@ -145,10 +163,85 @@ class AudioSplitter:
                 chunks_paths.append(target_path)
                 
             audio.close()
-            return chunks_paths
+            return chunks_paths, long_count_generated
         except Exception as e:
             if audio: audio.close()
             raise RuntimeError(f"分割出错: {str(e)}")
+
+class SmartBatchSplitWorker(QThread):
+    progress_log = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, root_dir, target_58s, min_duration=5.0):
+        super().__init__()
+        self.root_dir = root_dir
+        self.target_58s = target_58s
+        self.min_duration = min_duration
+
+    def run(self):
+        try:
+            if not os.path.exists(self.root_dir):
+                self.error.emit("根目录不存在")
+                return
+
+            # 1. 扫描已有的 58s 片段
+            out_dir = os.path.join(self.root_dir, "分段音频")
+            if not os.path.exists(out_dir): os.makedirs(out_dir)
+            
+            existing_count = 0
+            if os.path.exists(out_dir):
+                for f in os.listdir(out_dir):
+                    if "_part" in f.lower():
+                        try:
+                            f_path = os.path.join(out_dir, f)
+                            import subprocess
+                            cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", f_path]
+                            res = subprocess.run(cmd, capture_output=True, text=True, creationflags=0x08000000)
+                            if res.returncode == 0:
+                                dur = float(res.stdout.strip())
+                                if 56.5 <= dur <= 59.5: 
+                                    existing_count += 1
+                        except:
+                            pass
+
+            self.progress_log.emit(f"📊 当前库中已存在约 {existing_count} 个 58s 片段。")
+            total_58s_done = existing_count
+            
+            # 2. 扫描原始音频
+            audio_exts = ('.mp3', '.wav', '.m4a')
+            all_files = os.listdir(self.root_dir)
+            files_to_process = []
+            for f in all_files:
+                if f.lower().endswith(audio_exts) and "_part" not in f.lower():
+                    files_to_process.append(os.path.join(self.root_dir, f))
+
+            if not files_to_process:
+                self.finished.emit(f"未发现原始音频。目前已有 {existing_count} 个 58s。")
+                return
+
+            self.progress_log.emit(f"🚀 开始批量智能切割，目标 58s 总数: {self.target_58s} (片段≥{self.min_duration}s)...")
+            
+            for audio_path in files_to_process:
+                needed = max(0, self.target_58s - total_58s_done)
+                self.progress_log.emit(f"📦 处理: {os.path.basename(audio_path)} (补齐数: {needed})")
+                
+                _, long_gen = AudioSplitter.split_audio(
+                    audio_path, 
+                    max_duration_sec=58.0, 
+                    output_dir=out_dir, 
+                    target_long_count=needed,
+                    short_duration_sec=28.0,
+                    min_duration_sec=self.min_duration
+                )
+                total_58s_done += long_gen
+                if long_gen > 0:
+                    self.progress_log.emit(f"   生成 58s: {long_gen} 个 | 总进度: {total_58s_done}/{self.target_58s}")
+
+            self.finished.emit(f"任务完成！库中目前共有约 {total_58s_done} 个 58s 片段。")
+
+        except Exception as e:
+            self.error.emit(f"智能切割异常: {str(e)}")
 
 class AudioComparator:
     @staticmethod
@@ -262,11 +355,13 @@ class SplitWorker(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, file_paths, segment_length_sec, output_dir):
+    def __init__(self, file_paths, segment_length_sec, output_dir, mode="fixed", multiple_val=1):
         super().__init__()
         self.file_paths = file_paths
         self.segment_length_sec = segment_length_sec
         self.output_dir = output_dir
+        self.mode = mode
+        self.multiple_val = multiple_val
 
     def run(self):
         try:
@@ -278,7 +373,9 @@ class SplitWorker(QThread):
                 result_paths = AudioSplitter.split_audio(
                     file_path, 
                     max_duration_sec=self.segment_length_sec, 
-                    output_dir=self.output_dir
+                    output_dir=self.output_dir,
+                    mode=self.mode,
+                    multiple_val=self.multiple_val
                 )
                 self.progress_log.emit(f"   > 完成。生成了 {len(result_paths)} 个片段。")
             self.finished.emit()

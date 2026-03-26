@@ -3,7 +3,15 @@ import requests
 import re
 import datetime
 import json
+import sys
+import subprocess
+import tempfile
 from bs4 import BeautifulSoup
+from PyQt6.QtCore import QThread, pyqtSignal
+try:
+    import imageio_ffmpeg
+except:
+    pass
 
 class FileManager:
     @staticmethod
@@ -36,12 +44,12 @@ class FileManager:
                 # 第一列：项目主名
                 main_name = cols[0].get_text(strip=True)
                 
-                # 第四列：中文文案
+                # 第四列：中文文案 (保留原貌不处理)
                 cn_text = FileManager._extract_text_with_newlines(cols[3])
                 
-                # 第五列：西班牙语文案 (需要清洗)
+                # 第五列：西班牙语文案 (仅对外语执行高级符号清理和数字归一化)
                 es_text_raw = FileManager._extract_text_with_newlines(cols[4])
-                es_text = FileManager.clean_spanish_text(es_text_raw)
+                es_text = FileManager.clean_special_symbols(es_text_raw)
                 
                 # 第六、七列 (索引为5和6) 提取链接与副标题
                 links = []
@@ -111,20 +119,50 @@ class FileManager:
         return cell_element.get_text(strip=False).strip()
 
     @staticmethod
-    def clean_spanish_text(text):
+    def clean_special_symbols(text):
         """
-        专用于清理西班牙语文案中的无用特殊符号，保留基础标点和字母。
-        过滤 ✝️ 以及其他 emoji。
+        全量清理文案中的无用特殊符号、Emoji、花里胡哨的图形符号等。
+        同时把特殊的图文数字（如 1️⃣, ①, ❶, １等）全部转化为正常的阿拉伯数字。
+        保留多国语言文字（\w）、空白符（\s）以及大量常用的中英文标点符号和基础符号。
         """
         if not text:
             return ""
-        # 移除常见的 emoji 和特定符号 (这里使用一个简单范围粗略过滤)
-        # 清除 ✝ 及其变体，以及其他常见的杂项符号
-        cleaned = re.sub(r'[\u271D\uFE0F✝]', '', text)
+            
+        import unicodedata
         
-        # 移除多余空白
+        # 1. 替换 NFKC 内置标准里没有覆盖的特殊 emoji 和黑底实心数字
+        special_num_map = {
+            '🔟': '10',
+            '❶': '1', '❷': '2', '❸': '3', '❹': '4', '❺': '5', '❻': '6', '❼': '7', '❽': '8', '❾': '9', '❿': '10',
+            '➊': '1', '➋': '2', '➌': '3', '➍': '4', '➎': '5', '➏': '6', '➐': '7', '➑': '8', '➒': '9', '➓': '10',
+            '⓿': '0', '⓪': '0'
+        }
+        for k, v in special_num_map.items():
+            if k in text:
+                text = text.replace(k, v)
+                
+        # 2. 使用 NFKC 进行文本标准化
+        # 这一步会自动把 1️⃣, ①, １ 全部剥离修饰，转为最普通的 '1'。同时也会修正全角半角字母
+        text = unicodedata.normalize('NFKC', text)
+            
+        # 3. 白名单符号剔除
+        # 允许保留的字符集：
+        # \w: 所有的字母、汉字、数字、下划线 (含西语带调字符)
+        # \s: 所有空白字符 (空格、换行等)
+        # 常用英文标点和数学符号: .,!?:;'"()/¡¿%@#+=$€*&^|\
+        # 常用中文标点: ，。！？；：“”‘’（）【】《》、
+        # 最后加上 - 连字符
+        pattern = r'[^\w\s.,!?:;\'"()/¡¿%@#+=$€*&^|\\，。！？；：“”‘’（）【】《》、\-]'
+        
+        cleaned = re.sub(pattern, '', text)
+        
+        # 移除多余空白（但保留换行）
         cleaned = re.sub(r'[ \t]+', ' ', cleaned).strip()
         return cleaned
+
+    @staticmethod
+    def clean_spanish_text(text):
+        return FileManager.clean_special_symbols(text)
 
     @staticmethod
     def clean_and_merge_text(text, threshold=300):
@@ -323,3 +361,53 @@ class FileManager:
             return True, txt_path
         except Exception as e:
             return False, str(e)
+
+class SpeedWorker(QThread):
+    progress_log = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, file_path, speed):
+        super().__init__()
+        self.file_path = file_path
+        self.speed = speed
+
+    def run(self):
+        try:
+            ext = os.path.splitext(self.file_path)[1].lower()
+            is_video = ext in ['.mp4', '.mov', '.avi', '.flv', '.mkv']
+            
+            try:
+                local_ffmpeg = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, 'frozen', False) else __file__)), "ffmpeg.exe")
+                if os.path.exists(local_ffmpeg):
+                    ffmpeg_exe = local_ffmpeg
+                else:
+                    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except:
+                ffmpeg_exe = "ffmpeg"
+                
+            fd, temp_path = tempfile.mkstemp(suffix=ext)
+            os.close(fd)
+            
+            cmd = [ffmpeg_exe, "-y", "-i", self.file_path]
+            if is_video:
+                cmd.extend(["-filter:v", f"setpts={1/self.speed}*PTS", "-filter:a", f"atempo={self.speed}"])
+            else:
+                cmd.extend(["-filter:a", f"atempo={self.speed}"])
+            cmd.append(temp_path)
+            
+            creation_flags = 0
+            if os.name == 'nt':
+                 creation_flags = subprocess.CREATE_NO_WINDOW
+                 
+            self.progress_log.emit("⏳ 正在进行变速处理，请稍候...")
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
+            
+            if process.returncode == 0:
+                os.replace(temp_path, self.file_path)
+                self.finished.emit(True, "处理成功")
+            else:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                self.finished.emit(False, f"FFmpeg 错误:\n{process.stderr.decode('utf-8', errors='ignore')}")
+        except Exception as e:
+            self.finished.emit(False, str(e))

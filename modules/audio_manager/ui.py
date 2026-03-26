@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
 from modules.config_manager import ConfigManager
-from .widgets import AudioSplitWidget, AudioMatchWidget, AudioGenerateWidget, HistoryWidget
+from .widgets import AudioSplitWidget, AudioMatchWidget, AudioGenerateWidget, HistoryWidget, BearerTokenGenerateWidget
 
 class AudioManagerUI(QWidget):
     def __init__(self):
@@ -24,6 +24,9 @@ class AudioManagerUI(QWidget):
         self.google_widget = AudioGenerateWidget(self.config, provider="Google AI (Gemini)")
         self.tabs.addTab(self.google_widget, "🤖 Google AI 生成")
         
+        self.bearer_widget = BearerTokenGenerateWidget(self.config)
+        self.tabs.addTab(self.bearer_widget, "🔑 Bearer Token 直连")
+        
         self.history_widget = HistoryWidget()
         self.tabs.addTab(self.history_widget, "📜 历史记录")
         
@@ -35,3 +38,4 @@ class AudioManagerUI(QWidget):
         self.match_widget.update_default_path(global_path)
         self.eleven_widget.update_default_path(global_path)
         self.google_widget.update_default_path(global_path)
+        self.bearer_widget.update_default_path(global_path)

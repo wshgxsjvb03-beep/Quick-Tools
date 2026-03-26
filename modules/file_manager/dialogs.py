@@ -128,13 +128,27 @@ class SmartImportDialog(QDialog):
         total_downloads = 0
         success_downloads = 0
         
+        # 计算已存在项目的最大序号
+        start_index = 1
+        if self.output_dir and os.path.exists(self.output_dir):
+            import re
+            existing_files = os.listdir(self.output_dir)
+            max_idx = 0
+            for f in existing_files:
+                match = re.match(r'^(\d{2,})_', f)
+                if match:
+                    idx = int(match.group(1))
+                    if idx > max_idx:
+                        max_idx = idx
+            start_index = max_idx + 1
+        
         for i, item in enumerate(self.parsed_data):
             main_name = item.get('main_name', '未命名')
             self.lbl_status.setText(f"正在处理 {i+1}/{total}: {main_name} ...")
             QApplication.processEvents() # 防止界面假死
             
-            # 1. 获取不冲突的基础文件名
-            base_name = FileManager.get_unique_base_name(self.output_dir, item, index=i+1)
+            # 1. 获取不冲突的基础文件名，基于已存在的最大序号递增
+            base_name = FileManager.get_unique_base_name(self.output_dir, item, index=start_index + i)
             
             # 2. 合并写入文案到单 TXT
             ok, txt_path = FileManager.save_combined_text(self.output_dir, base_name, item)
