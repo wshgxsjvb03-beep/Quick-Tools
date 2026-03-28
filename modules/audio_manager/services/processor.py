@@ -93,6 +93,15 @@ class AudioSplitter:
             current_pos = 0.0
             long_count_generated = 0
             
+            # 兼容旧版的固定和倍数切割模式
+            if target_long_count is None:
+                if mode == "multiple" and multiple_val > 0:
+                    base_target_dur = min(max_duration_sec, total_duration / float(multiple_val))
+                else:
+                    base_target_dur = max_duration_sec
+            else:
+                base_target_dur = short_duration_sec
+                
             while current_pos < total_duration:
                 remaining = total_duration - current_pos
                 # 决定当前段的时长
@@ -103,8 +112,11 @@ class AudioSplitter:
                     else:
                         current_target_dur = short_duration_sec
                         is_long = False
-                else:
+                elif target_long_count is not None:
                     current_target_dur = short_duration_sec
+                    is_long = False
+                else:
+                    current_target_dur = base_target_dur
                     is_long = False
                 
                 # 开始切分
@@ -355,13 +367,14 @@ class SplitWorker(QThread):
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, file_paths, segment_length_sec, output_dir, mode="fixed", multiple_val=1):
+    def __init__(self, file_paths, segment_length_sec, output_dir, mode="fixed", multiple_val=1, min_duration=5.0):
         super().__init__()
         self.file_paths = file_paths
         self.segment_length_sec = segment_length_sec
         self.output_dir = output_dir
         self.mode = mode
         self.multiple_val = multiple_val
+        self.min_duration = min_duration
 
     def run(self):
         try:
@@ -370,12 +383,13 @@ class SplitWorker(QThread):
             total = len(self.file_paths)
             for i, file_path in enumerate(self.file_paths):
                 self.progress_log.emit(f"[{i+1}/{total}] 正在处理: {os.path.basename(file_path)} ...")
-                result_paths = AudioSplitter.split_audio(
+                result_paths, _ = AudioSplitter.split_audio(
                     file_path, 
                     max_duration_sec=self.segment_length_sec, 
                     output_dir=self.output_dir,
                     mode=self.mode,
-                    multiple_val=self.multiple_val
+                    multiple_val=self.multiple_val,
+                    min_duration_sec=self.min_duration
                 )
                 self.progress_log.emit(f"   > 完成。生成了 {len(result_paths)} 个片段。")
             self.finished.emit()

@@ -147,7 +147,10 @@ class AudioSplitWidget(QWidget):
 
         self.log_area.clear()
         self.split_btn.setEnabled(False)
-        self.worker = SplitWorker(file_paths, sec_length, output_dir, mode=mode, multiple_val=multiple_val)
+        self.worker = SplitWorker(
+            file_paths, sec_length, output_dir, 
+            mode=mode, multiple_val=multiple_val, min_duration=10.0
+        )
         self.worker.progress_log.connect(self.log_area.append)
         self.worker.finished.connect(lambda: [self.split_btn.setEnabled(True), QMessageBox.information(self, "完成", "任务已完成！")])
         self.worker.error.connect(lambda e: [self.split_btn.setEnabled(True), self.log_area.append(f"❌ 错误: {e}")])
