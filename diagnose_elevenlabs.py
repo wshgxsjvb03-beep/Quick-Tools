@@ -74,8 +74,7 @@ def test_elevenlabs_library():
 
 def test_api_key(api_key):
     """测试单个 API Key"""
-    masked = f"{api_key[:4]}****{api_key[-4:]}" if len(api_key) >= 8 else "****"
-    print(f"\n[测试 Key: {masked}]")
+    print(f"\n[测试 Key: ****]")
     
     try:
         from elevenlabs.client import ElevenLabs

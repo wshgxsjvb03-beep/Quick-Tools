@@ -19,8 +19,7 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-masked_key = f"{api_key[:4]}****{api_key[-4:]}" if len(api_key) >= 8 else "****"
-print(f"Using Key: {masked_key}")
+print(f"Using Key: ****")
 print("Fetching available models...")
 
 try:

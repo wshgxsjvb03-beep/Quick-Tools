@@ -555,8 +555,7 @@ class ElevenLabsKeyManagerDialog(QDialog):
         """根据 API Key 刷新余额（排序安全）"""
         row = self._find_row_by_key(api_key)
         if row < 0: return
-        masked_key = f"{api_key[:4]}****{api_key[-4:]}" if len(api_key) >= 8 else "****"
-        print(f"[ElevenLabsKeyManagerDialog] 开始查询 Key={masked_key}")
+        print(f"[ElevenLabsKeyManagerDialog] 开始查询 Key=****")
         self.table.setItem(row, 2, QTableWidgetItem("查询中..."))
         self.table.setItem(row, 3, QTableWidgetItem("-"))
         self.table.setItem(row, 4, QTableWidgetItem("-"))
@@ -572,8 +571,7 @@ class ElevenLabsKeyManagerDialog(QDialog):
         """查询成功回调，用 API Key 定位行（排序安全）"""
         row = self._find_row_by_key(api_key)
         if row < 0: return
-        masked_key = f"{api_key[:4]}****{api_key[-4:]}" if len(api_key) >= 8 else "****"
-        print(f"[ElevenLabsKeyManagerDialog] 查询成功 Key={masked_key}, Used={info['character_count']}, Limit={info['character_limit']}")
+        print(f"[ElevenLabsKeyManagerDialog] 查询成功 Key=****, Used={info['character_count']}, Limit={info['character_limit']}")
         
         self.table.setItem(row, 2, QTableWidgetItem(str(info['character_count'])))
         self.table.setItem(row, 3, QTableWidgetItem(str(info['character_limit'])))
@@ -613,8 +611,7 @@ class ElevenLabsKeyManagerDialog(QDialog):
         """查询失败回调，用 API Key 定位行（排序安全）"""
         row = self._find_row_by_key(api_key)
         if row < 0: return
-        masked_key = f"{api_key[:4]}****{api_key[-4:]}" if len(api_key) >= 8 else "****"
-        print(f"[ElevenLabsKeyManagerDialog] 查询失败 Key={masked_key}, Error={err}")
+        print(f"[ElevenLabsKeyManagerDialog] 查询失败 Key=****, Error={err}")
         
         self.table.setItem(row, 2, QTableWidgetItem("查询失败"))
         self.table.setItem(row, 3, QTableWidgetItem("查询失败"))

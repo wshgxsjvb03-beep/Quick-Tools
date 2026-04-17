@@ -401,8 +401,7 @@ class KeyInfoWorker(QThread):
         except Exception as e:
             # 记录详细错误信息用于调试
             error_detail = f"{type(e).__name__}: {str(e)}"
-            masked_key = f"{self.api_key[:4]}****{self.api_key[-4:]}" if self.api_key and len(self.api_key) >= 8 else "****"
-            print(f"[KeyInfoWorker] 查询失败 Key={masked_key}, Error={error_detail}")
+            print(f"[KeyInfoWorker] 查询失败 Key=****, Error={error_detail}")
             traceback.print_exc()
             self.error.emit(self.api_key, error_detail)
 
