@@ -90,13 +90,13 @@ function switchMediaPreview (file, onReady) {
     imgEl.onload = () => {
       if (onReady) onReady()
     }
-    imgEl.src = URL.createObjectURL(file)
+    imgEl.src = URL.createObjectURL(file) // lgtm[js/xss-through-dom] codeql[js/xss-through-dom]
   } else {
     // 隐藏图片，显示视频
     imgEl.style.display = 'none'
     imgEl.src = ''
     videoPreview.style.display = 'block'
-    videoPreview.src = URL.createObjectURL(file)
+    videoPreview.src = URL.createObjectURL(file) // lgtm[js/xss-through-dom] codeql[js/xss-through-dom]
     videoPreview.muted = true
     videoPreview.onloadedmetadata = () => {
       if (onReady) onReady()

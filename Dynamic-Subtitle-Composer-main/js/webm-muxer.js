@@ -1411,7 +1411,7 @@ If you want to allow non-zero first timestamps, set firstTimestampBehavior: 'per
       if (!__privateGet(this, _config)) {
         throw new Error('Encoder not configured.')
       }
-      text = text.replace('\r\n', '\n').replace('\r', '\n')
+      text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
       cueBlockHeaderRegex.lastIndex = 0
       let match
       if (!__privateGet(this, _preambleSeen)) {
